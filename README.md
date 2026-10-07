@@ -21,10 +21,11 @@ The command is `bba`, so it does not hide the babashka `bb` command.
    bash < <(curl -s https://raw.githubusercontent.com/babashka/babashka/master/install) --dir ~/.local/bin
    ```
 
-2. Put `bba` on your PATH:
+2. Get bba and put it on your PATH:
 
    ```bash
-   ln -s "$PWD/bb/bin/bba" ~/.local/bin/bba
+   git clone git@github.com:o3-cloud/bba.git
+   ln -s "$PWD/bba/bin/bba" ~/.local/bin/bba
    ```
 
 3. Set a key for one provider. OpenRouter gives you many models with one key:
@@ -222,7 +223,7 @@ WARNING: bba has no sandbox. Code in the world runs with your user rights. It ca
 ## Development
 
 ```bash
-cd bb
+cd bba
 bb test        # all tests, offline, with a fake provider
 bb agent       # run bba from source
 ```
