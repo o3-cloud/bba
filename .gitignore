@@ -1,0 +1,8 @@
+ .gitignore
+.lsp/
+.clj-kondo/.cache/
+.cpcache/
+nrepl-port
+.idea/
+*.iml
+.DS_Store

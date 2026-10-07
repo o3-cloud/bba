@@ -53,7 +53,8 @@
 (defn bash-tool [{:keys [command timeout]} ctx]
   (let [ms (* 1000 (or timeout default-timeout-s))
         proc (p/process {:dir (:cwd ctx) :out :string :err :out :in ""} "bash" "-c" command)
-        res (deref proc ms ::timeout)]
+        res (try (deref proc ms ::timeout)
+                 (catch InterruptedException e (p/destroy-tree proc) (throw e)))]
     (if (= res ::timeout)
       (do (p/destroy-tree proc)
           (err (str (:out @proc) "\n[timed out after " (/ ms 1000) " s]")))

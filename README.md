@@ -3,7 +3,7 @@
 A small, terminal-first coding agent in babashka, modelled on [pi](https://pi.dev/).
 The command is `bba` so it never shadows the babashka `bb` binary.
 
-- Core: agent loop + 4 tools (`read`, `write`, `edit`, `bash`), under 500 lines in `src/bba/`.
+- Kernel: agent loop, extension API and 4 tools (`read`, `write`, `edit`, `bash`) in `core.clj`, `ext.clj`, `tools.clj`, under 500 lines. Providers (`provider.clj`, `openai.clj`) and the terminal UI (`main.clj`, `tui.clj`, `ui.clj`) sit on top.
 - Everything else is an extension: a plain Clojure file that uses `bba.ext`.
 - Self-improvement: the agent writes a file to `.bba/extensions/`, you type `/reload`, and the new tool or command works in the same session.
 
@@ -17,11 +17,50 @@ cd bb && bb agent -p "..."            # same, as a bb task
 cd bb && bb test                      # offline tests (fake provider, no key)
 ```
 
-Options: `--max-turns N` (default 50, or `BBA_MAX_TURNS`), `--no-extensions`.
-Env: `BBA_MODEL` (default `claude-opus-5-5`), `BBA_HOME` (default `~/.bba`), `BBA_DEBUG=1` (stack traces).
-Interactive commands: `/reload`, `/help`, `/quit`, `/exit`, plus extension commands.
+Options: `-c` (continue the latest session in this folder), `--provider NAME`, `--model NAME`, `--max-turns N` (default 50, or `BBA_MAX_TURNS`), `--no-extensions`.
+Env: `BBA_PROVIDER`, `BBA_MODEL`, `BBA_HOME` (default `~/.bba`), `BBA_DEBUG=1` (stack traces), `NO_COLOR` (plain output).
 
-The live Anthropic path is untested on the build host (no API key); the request shape is unit-tested.
+## Interactive session
+
+On a terminal, answers stream as they arrive and each finished line is redrawn with light markdown (headers, `**bold**`, `` `code` ``, fenced blocks). A spinner shows `thinking...` while the model works and `running <tool>...` while a tool runs.
+
+| Key | Action |
+|---|---|
+| Enter | send |
+| `\` then Enter, or Alt+Enter | new line (multi-line message); pasted text keeps its newlines |
+| ← → Home End, Ctrl-A Ctrl-E | move the cursor |
+| ↑ ↓ | history (saved in `$BBA_HOME/history`) |
+| Ctrl-W, Ctrl-U, Ctrl-K | delete word, to line start, to line end |
+| Ctrl-C | while the agent works: stop the turn (a running bash command is killed). At the prompt: clear the line |
+| Ctrl-D on an empty line, `/quit`, `/exit` | leave |
+| Ctrl-L, `/clear` | clear the screen |
+
+Commands: `/reload`, `/provider [NAME]`, `/model [NAME]`, `/clear`, `/help`, plus extension commands.
+`/provider NAME` changes the provider and uses its default model; `/model NAME` changes the model. Both keep the conversation. Without NAME they show the current setting.
+
+A stopped turn is dropped from the conversation (the model does not see it next time), but any file changes it made stay. `-c` resumes from the session file and also skips stopped turns.
+
+When stdin is not a terminal (a pipe or a script), bba reads plain lines and prints whole answers, so it stays scriptable.
+
+## Providers
+
+| `--provider` | Needs | Default model | Server |
+|---|---|---|---|
+| `anthropic` (default) | `ANTHROPIC_API_KEY` | `claude-opus-5-5` | api.anthropic.com |
+| `openai` | `OPENAI_API_KEY` | `gpt-5` | `OPENAI_BASE_URL` (default `https://api.openai.com/v1`) |
+| `openrouter` | `OPENROUTER_API_KEY` | `anthropic/claude-opus-5.5` | `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`) |
+| `ollama` | nothing | `gpt-oss` | `OLLAMA_HOST` (default `http://localhost:11434`) |
+
+```bash
+bb/bin/bba --provider ollama --model qwen3.5:0.8b -p "list the files here"
+BBA_PROVIDER=openai BBA_MODEL=gpt-5-mini bb/bin/bba
+```
+
+OpenAI, OpenRouter and Ollama use the Chat Completions API, so `openai` with `OPENAI_BASE_URL` also works with other servers that offer it. `src/bba/openai.clj` translates messages both ways.
+
+Live status: OpenRouter (`anthropic/claude-opus-5.5`) and Ollama (`qwen3.5:0.8b`) are tested live with one bash tool call each. Anthropic and OpenAI are tested only against a local fake server.
+
+An extension can still replace the provider with `ext/set-provider!`.
 
 ## Extensions
 

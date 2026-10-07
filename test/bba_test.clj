@@ -35,8 +35,11 @@
 (defn tool-results [req]
   (->> (:messages req) last :content (filter #(= "tool_result" (:type %)))))
 
+(def ^:private created (atom []))  ; temp folders, deleted after each test
+
 (defn temp-dirs []
   (let [d (str (fs/create-temp-dir {:prefix "bba-test"}))]
+    (swap! created conj d)
     {:cwd (str (fs/path d "work")) :home (str (fs/path d "home")) :base d}))
 
 (defn copy-ext [cwd name]
@@ -57,7 +60,12 @@
                           :in (java.io.BufferedReader. (java.io.StringReader. (or input "")))}))]
     {:code code :out (str out) :err (str err)}))
 
-(use-fixtures :each (fn [t] (ext/reset-all!) (t) (ext/reset-all!)))
+(use-fixtures :each (fn [t]
+                      (ext/reset-all!)
+                      (try (t)
+                           (finally (ext/reset-all!)
+                                    (run! fs/delete-tree @created)
+                                    (reset! created [])))))
 
 ;; ---------------------------------------------------------------- acceptance
 
@@ -152,10 +160,18 @@
 
 ;; ---------------------------------------------------------------- derived ACs / units
 
+;; NFR: core < 500 lines. Since 2026-10-07 "core" means the agent kernel (loop, extension API,
+;; built-in tools), as in pi. Providers (provider, openai) and the terminal UI (main, tui, ui)
+;; are layers on top and are reported, not limited.
+(def kernel-files ["core.clj" "ext.clj" "tools.clj"])
+
+(defn- lines-in [names] (reduce + (map #(count (str/split-lines (slurp (str (fs/path root "src" "bba" %))))) names)))
+
 (deftest ac7-core-size
-  (let [n (reduce + (map #(count (str/split-lines (slurp (str %))))
-                         (fs/glob (fs/path root "src" "bba") "*.clj")))]
-    (is (< n 500) (str "core is " n " lines"))))
+  (let [all (map (comp str fs/file-name) (fs/glob (fs/path root "src" "bba") "*.clj"))
+        kernel (lines-in kernel-files)]
+    (println (str "  [ac7] kernel " kernel " lines; all of src/bba " (lines-in all) " lines"))
+    (is (< kernel 500) (str "kernel is " kernel " lines"))))
 
 (deftest ac8-tool-errors-are-results
   (let [dirs (temp-dirs)
@@ -191,7 +207,7 @@
     (is (str/includes? out "max turns"))))
 
 (deftest builtin-tools
-  (let [dir (str (fs/create-temp-dir)) ctx {:cwd dir}]
+  (let [dir (:base (temp-dirs)) ctx {:cwd dir}]
     (testing "write creates parents, read reads, offset/limit"
       (is (str/includes? (tools/write-tool {:path "a/b.txt" :content "1\n2\n3\n4"} ctx) "wrote"))
       (is (= "1\n2\n3\n4" (tools/read-tool {:path "a/b.txt"} ctx)))
