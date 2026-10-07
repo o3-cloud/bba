@@ -118,7 +118,7 @@ NOTE: An invariant about a function that you have not built yet shows a warning 
 | `/rollback N` | Make a new revision with the state of revision N. History stays. |
 | `/functions`, `/describe NAME` | List the functions, or show one with its arguments, docstring and source. |
 | `/history`, `/status` | Show the revisions, or the state of the world and its checks. |
-| `/provider [NAME]`, `/model [NAME]` | Show or change the provider or the model. The conversation stays. |
+| `/provider [NAME [MODEL]]`, `/model [NAME]` | Show or change the provider, with an optional model. The conversation stays. |
 | `/reload` | Load new or changed extensions. |
 | `/new` | Start a new session: a new log file and an empty conversation. The world stays. |
 | `/clear`, `/help`, `/quit` | Clear the screen, list the commands, leave. |
