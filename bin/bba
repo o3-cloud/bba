@@ -1,0 +1,7 @@
+#!/usr/bin/env bb
+;; bba — babashka agent. Named bba so it never shadows the babashka `bb` binary.
+(require '[babashka.classpath :as cp] '[babashka.fs :as fs])
+(let [script (fs/real-path (System/getProperty "babashka.file"))]
+  (cp/add-classpath (str (fs/path (fs/parent (fs/parent script)) "src"))))
+(require 'bba.main)
+(apply (resolve 'bba.main/-main) *command-line-args*)
