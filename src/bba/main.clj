@@ -99,7 +99,7 @@
 ;; ---------------------------------------------------------------- commands
 
 (defn- help-text []
-  (str "commands: /new /reload /provider [NAME] /model [NAME] /clear /help /quit /exit"
+  (str "commands: /new /reload /provider [NAME [MODEL]] /model [NAME] /clear /help /quit /exit"
        (str/join (map #(str " /" (:name %)) (sort-by :name (ext/commands))))))
 
 (defn- show-model [env]
@@ -107,16 +107,20 @@
                 (when (ext/provider) " (an extension replaced the provider; it ignores this)"))))
 
 (defn- switch-provider
-  "No NAME: show the current provider and the list. NAME: switch and use its default model."
-  [ctx name]
-  (if (str/blank? name)
-    (do (show-model (:env ctx))
-        (println (str "providers: " (str/join ", " (sort (keys provider/providers)))))
-        ctx)
-    (let [env (-> (:env ctx) (assoc "BBA_PROVIDER" (str/lower-case name)) (dissoc "BBA_MODEL"))]
-      (if-let [problem (provider/check-env env)]
-        (do (ext/warn problem "; still using " (provider/provider-name (:env ctx))) ctx)
-        (do (show-model env) (assoc ctx :env env))))))
+  "No NAME: show the current provider and the list. NAME [MODEL]: switch, and set
+  MODEL when given. The model is not checked until the next request."
+  [ctx args]
+  (let [[name model] (str/split (str/trim (str args)) #"\s+")
+        model (not-empty model)]
+    (if (str/blank? name)
+      (do (show-model (:env ctx))
+          (println (str "providers: " (str/join ", " (sort (keys provider/providers)))))
+          ctx)
+      (let [env (cond-> (assoc (:env ctx) "BBA_PROVIDER" (str/lower-case name))
+                  model (assoc "BBA_MODEL" model))]
+        (if-let [problem (provider/check-env env)]
+          (do (ext/warn problem "; still using " (provider/provider-name (:env ctx))) ctx)
+          (do (show-model env) (assoc ctx :env env)))))))
 
 (defn- switch-model
   "No NAME: show the current model. NAME: use it for the next messages (not checked until then)."
@@ -134,7 +138,7 @@
               (println (str "reloaded: " (count (ext/tools)) " tools, "
                             (count (ext/commands)) " commands"))
               ctx)
-   "provider" switch-provider
+   "provider" (fn [ctx args] (switch-provider ctx args))
    "model" switch-model
    "help" (fn [ctx _] (println (help-text)) ctx)
    "clear" (fn [ctx _] (ui/clear-screen) ctx)})

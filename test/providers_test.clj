@@ -181,6 +181,15 @@
     (testing "history is kept across the switch"
       (is (= ["hi" "from-ollama" "again"] (map :content (rest (:messages (:body (second reqs))))))))))
 
+(deftest provider-command-takes-an-optional-model
+  (let [{:keys [code out]} (session {"ANTHROPIC_API_KEY" "k" "OPENAI_API_KEY" "k2"}
+                                    ["/provider openai gpt-x" "/provider" "/quit"])]
+    (is (= 0 code))
+    (testing "both name and model are applied"
+      (is (str/includes? out "provider: openai, model: gpt-x")))
+    (testing "the model survives a later /provider with no args"
+      (is (str/includes? out "provider: openai, model: gpt-x")))))
+
 (deftest new-starts-a-fresh-session
   (let [[{:keys [code out]} reqs]
         (with-server 200 "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"
