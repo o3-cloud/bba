@@ -180,3 +180,14 @@
     (is (= "/v1/chat/completions" (:uri (first reqs))))
     (testing "history is kept across the switch"
       (is (= ["hi" "from-ollama" "again"] (map :content (rest (:messages (:body (second reqs))))))))))
+
+(deftest new-starts-a-fresh-session
+  (let [[{:keys [code out]} reqs]
+        (with-server 200 "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"
+          #(session {"ANTHROPIC_API_KEY" "k" "OLLAMA_HOST" %}
+                    ["/provider ollama" "hi" "/new" "again" "/quit"]))]
+    (is (= 0 code))
+    (is (str/includes? out "new session"))
+    (is (= 2 (count (distinct (re-seq #"sessions/\S+\.jsonl" out)))) "banner and /new print different session files")
+    (testing "the conversation is empty after /new"
+      (is (= ["again"] (map :content (rest (:messages (:body (second reqs))))))))))

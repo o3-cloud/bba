@@ -99,7 +99,7 @@
 ;; ---------------------------------------------------------------- commands
 
 (defn- help-text []
-  (str "commands: /reload /provider [NAME] /model [NAME] /clear /help /quit /exit"
+  (str "commands: /new /reload /provider [NAME] /model [NAME] /clear /help /quit /exit"
        (str/join (map #(str " /" (:name %)) (sort-by :name (ext/commands))))))
 
 (defn- show-model [env]
@@ -178,6 +178,11 @@
            (= :cancel line) (do (println (ui/dim "(Ctrl-D or /quit to exit)")) (recur ctx messages))
            (str/blank? line) (recur ctx messages)
            (#{"/quit" "/exit"} (str/trim line)) 0
+           (= "/new" (str/trim line))
+           (let [ctx (assoc ctx :session-file (core/new-session-file (:cwd ctx)))]
+             (println (ui/bold "bba") "— new session" (ui/dim (:session-file ctx)))
+             (ext/emit :session-start {} ctx)
+             (recur ctx []))
            (str/starts-with? (str/triml line) "/") (recur (run-command ctx (str/trim line)) messages)
            :else
            (let [live (atom true)
