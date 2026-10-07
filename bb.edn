@@ -1,8 +1,8 @@
 {:paths ["src" "test"]
  :tasks
  {test  {:doc  "Run the bba tests (offline, fake provider)"
-         :task (let [_ (require 'clojure.test 'bba-test 'providers-test 'tui-test)
-                     {:keys [fail error]} ((resolve 'clojure.test/run-tests) 'bba-test 'providers-test 'tui-test)]
+         :task (let [_ (require 'clojure.test 'bba-test 'providers-test 'tui-test 'world-test)
+                     {:keys [fail error]} ((resolve 'clojure.test/run-tests) 'bba-test 'providers-test 'tui-test 'world-test)]
                  (when (pos? (+ fail error)) (System/exit 1)))}
   agent {:doc  "Run the agent: bb agent [-p PROMPT]"
          :task (apply (requiring-resolve 'bba.main/-main) *command-line-args*)}}}

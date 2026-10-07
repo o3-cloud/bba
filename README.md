@@ -17,7 +17,7 @@ cd bb && bb agent -p "..."            # same, as a bb task
 cd bb && bb test                      # offline tests (fake provider, no key)
 ```
 
-Options: `-c` (continue the latest session in this folder), `--provider NAME`, `--model NAME`, `--max-turns N` (default 50, or `BBA_MAX_TURNS`), `--no-extensions`.
+Options: `-c` (continue the latest session in this folder), `--provider NAME`, `--model NAME`, `--max-turns N` (default 50, or `BBA_MAX_TURNS`), `--no-extensions`, `--world` (see World mode).
 Env: `BBA_PROVIDER`, `BBA_MODEL`, `BBA_HOME` (default `~/.bba`), `BBA_DEBUG=1` (stack traces), `NO_COLOR` (plain output).
 
 ## Interactive session
@@ -84,6 +84,31 @@ Loaded at start and on `/reload`, in this order: `$BBA_HOME/extensions/*.clj`, t
 
 Project context: `AGENTS.md` in `$BBA_HOME` and in the working folder is added to the system prompt.
 Sessions: one JSONL file per run in `.bba/sessions/`. The API key is never written.
+
+## World mode (`--world`)
+
+After Geoffrey Huntley's [Jiti](https://ghuntley.com/lisp/): grow a running Clojure application by talking to it, with no build step. `bba --world` opens one live namespace (the *world*) and offers the model two tools instead of the file tools:
+
+- `develop_form {code, remove?}` adds, redefines or removes definitions (`defn`, `def`, `defonce`).
+- `execute_form {code}` calls or composes existing functions. It must not define or redefine vars.
+
+Both use one evaluator. Every attempt runs against a checkpoint. An error, a failed invariant or a timeout restores the last accepted state and returns an EDN result (`:status`, `:message`, `:failed`, `:form`) so the model can fix and retry. An accepted attempt becomes an immutable revision.
+
+Commands (no model or API key needed; with no key, world mode starts with manual commands only):
+`/develop CODE` (`/develop -NAME` removes), `/execute CODE`, `/preview CODE` (shows the result, keeps nothing), `/rollback N`, `/functions`, `/describe NAME`, `/history`, `/status`, `/abort`. Ctrl-C stops a running attempt and restores; `/abort` at an idle prompt says there is nothing to abort.
+
+Store, in `.bba/world/`:
+- `world.edn` — the adapter: `{:ns world :invariants [{:name .. :form ..}] :goals [..] :timeout-ms 30000 :max-result-chars 4000}`. Invariants must hold after every change; goals are only reported.
+- `revisions/NNNNNN.edn` — full snapshots (ordered accepted source + printable atom/volatile contents), never changed. `CURRENT` names the live one and is moved atomically after the revision is fully written; revisions above CURRENT (interrupted operations) are ignored. `/rollback N` publishes N's state as a new revision, so history is kept.
+- `LOCK` (one bba process per world), `ops.jsonl` (one line per attempt). A `.gitignore` keeps all of these except `world.edn` out of git.
+
+Differences from Common Lisp / Jiti:
+- **No conditions or restarts.** SCI cannot pause a live stack. A failure restores the checkpoint, then reports the exception.
+- **Restore = rebuild.** The namespace is discarded and the accepted source is replayed. So develop forms with side effects (`println`, `spit`) run again on each restore: keep develop forms to definitions and put effects in `execute_form`.
+- **Runaway CPU loops cannot be killed.** A timeout restores the world and detaches the thread, but it keeps using CPU until bba exits (`/status` counts them). Blocking code (sleep, I/O) is stopped.
+- Only the world namespace and its atoms/volatiles are checkpointed. Files, network and other namespaces are not. Values that cannot be printed as EDN are not saved (a warning names them).
+
+Trust: world code runs with your user rights in the bba process, like `bash` and extensions. The adapter's invariant and goal forms are code: `--world` in an untrusted repo runs `.bba/world/world.edn` and replays any revisions committed under `.bba/world/revisions/`, and `--no-extensions` does not disable either. The adapter `:ns` must be a new name (harness and library namespaces such as `bba.*`, `clojure.*` and `user` are refused, since each restore removes and rebuilds the world namespace). World data goes only to the configured provider.
 
 ## Trust model
 
