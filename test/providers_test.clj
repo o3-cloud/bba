@@ -69,10 +69,12 @@
   (is (:error (main/parse-args ["--provider"]))))
 
 (deftest provider-flag-overrides-env-in-main
-  (let [err (java.io.StringWriter.)
+  (let [dir (str (fs/create-temp-dir {:prefix "bba-test"}))
+        err (java.io.StringWriter.)
         code (binding [*err* err *out* (java.io.StringWriter.)]
-               (main/run {:args ["--provider" "openai" "-p" "hi"] :cwd (str (System/getProperty "java.io.tmpdir"))
-                          :env {"ANTHROPIC_API_KEY" "k" "BBA_HOME" "/nonexistent-bba-home"} :in nil}))]
+               (try (main/run {:args ["--provider" "openai" "-p" "hi"] :cwd dir
+                               :env {"ANTHROPIC_API_KEY" "k" "BBA_HOME" "/nonexistent-bba-home"} :in nil})
+                    (finally (fs/delete-tree dir))))]
     (is (= 1 code))
     (is (str/includes? (str err) "OPENAI_API_KEY is not set"))))
 

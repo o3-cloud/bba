@@ -5,12 +5,12 @@
             [bba.core :as core]
             [bba.ext :as ext]
             [bba.provider :as provider]
-            [bba.tools :as tools]
             [bba.tui :as tui]
-            [bba.ui :as ui]))
+            [bba.ui :as ui]
+            [bba.world :as world]))
 
 (def usage (str "usage: bba [-p PROMPT] [-c] [--provider anthropic|openai|openrouter|ollama] [--model NAME]"
-                " [--max-turns N] [--no-extensions] [--world]"))
+                " [--max-turns N] [--no-extensions]"))
 
 (defn parse-args [args]
   (loop [[a & more] args opts {}]
@@ -27,7 +27,7 @@
                                  (assoc opts :error (str a " needs a value")))
       ("-c" "--continue") (recur more (assoc opts :continue true))
       "--no-extensions" (recur more (assoc opts :no-extensions true))
-      "--world" (recur more (assoc opts :world true))
+      "--world" (recur more opts)  ; the world is the only mode; the old flag is accepted and ignored
       ("-h" "--help") (assoc opts :help true)
       (assoc opts :error (str "unknown argument: " a)))))
 
@@ -195,18 +195,17 @@
 (defn- run-session
   "Register tools, load extensions, check the provider, then run -p or the interactive loop."
   [{:keys [cwd env] :as ctx} {:keys [prompt no-extensions] :as opts} in world]
-  (when-not world (tools/register-builtins!))  ; world mode offers only the world tools (and extensions)
   (if no-extensions (ext/reset-extensions!) (core/load-extensions! ctx))
   (let [problem (when-not (ext/provider) (provider/check-env env))]
-    (if (and problem (or (not world) prompt))
+    (if (and problem prompt)
       (do (binding [*out* *err*] (println problem)) 1)
       (let [old (when (:continue opts)
                   (or (core/latest-session cwd)
                       (do (ext/warn "no session to continue here; starting a new one") nil)))
             ctx (assoc ctx :session-file (or old (core/new-session-file cwd)))
             messages (if old (core/load-session old) [])]
-        (when problem (ext/warn problem "; world mode: manual /commands only"))
-        (when (and world (not prompt))
+        (when problem (ext/warn problem "; manual /commands only"))
+        (when-not prompt
           (println (ui/dim (str (when (:created world) "created .bba/world/world.edn; ") "world: " (:ns world)
                                 ", revision " (:rev world) ", " (:functions world) " functions"))))
         (ext/emit :session-start {} ctx)
@@ -234,14 +233,12 @@
                  :print (when-not prompt println)
                  :tty? (boolean tty?)
                  :stream? (boolean (and tty? (not prompt)))}
-            world (when (:world opts)  ; bba.world is loaded only with --world
-                    (try {:info ((requiring-resolve 'bba.world/start!) ctx)}
-                         (catch clojure.lang.ExceptionInfo e {:error (ex-message e)})))]
+            world (try {:info (world/start! ctx)}  ; the world is the only mode
+                       (catch clojure.lang.ExceptionInfo e {:error (ex-message e)}))]
         (if (:error world)
           (do (ext/warn (:error world)) 1)
-          (try (run-session (cond-> ctx world (assoc :system-prompt (requiring-resolve 'bba.world/system-prompt)))
-                            opts in (:info world))
-               (finally (when world ((requiring-resolve 'bba.world/stop!))))))))))
+          (try (run-session (assoc ctx :system-prompt world/system-prompt) opts in (:info world))
+               (finally (world/stop!))))))))
 
 (defn -main [& args]
   (let [code (try (run {:args args :cwd (str (fs/cwd)) :env (into {} (System/getenv))

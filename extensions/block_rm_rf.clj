@@ -1,4 +1,4 @@
-;; Example extension: block bash commands that contain "rm -rf".
+;; Example extension: block world forms that contain "rm -rf" (for example (sys/sh "rm -rf ...")).
 ;; Example only, not a security boundary: plain text match, so "rm -fr" gets past it.
 ;; Copy to .bba/extensions/ (project) or ~/.bba/extensions/ (user) to enable.
 (ns bba.extensions.block-rm-rf
@@ -7,5 +7,5 @@
 
 (ext/on! :tool-call
          (fn [{:keys [name input]} _ctx]
-           (when (and (= name "bash") (str/includes? (str (:command input)) "rm -rf"))
+           (when (and (#{"execute_form" "develop_form"} name) (str/includes? (str (:code input)) "rm -rf"))
              {:block true :reason "rm -rf is not allowed"})))

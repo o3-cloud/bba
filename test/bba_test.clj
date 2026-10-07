@@ -7,9 +7,10 @@
             [bba.ext :as ext]
             [bba.main :as main]
             [bba.provider :as provider]
-            [bba.tools :as tools]))
+            [bba.sys :as sys]))
 
 (def root (str (fs/parent (fs/parent (fs/absolutize *file*)))))
+
 (def bb-bin (or (some-> (fs/which "bb") str) "bb"))
 
 ;; ---------------------------------------------------------------- helpers
@@ -28,6 +29,7 @@
               :stop_reason (if (some #(= "tool_use" (:type %)) c) "tool_use" "end_turn")}))}))
 
 (defn tool-use [id name input] {:type "tool_use" :id id :name name :input input})
+
 (defn text [s] {:type "text" :text s})
 
 (defn tool-names [req] (set (map :name (:tools req))))
@@ -71,12 +73,13 @@
 
 (deftest ac1-print-mode-with-tool-use
   (let [dirs (temp-dirs)
-        fp (fake-provider [[(tool-use "t1" "bash" {:command "echo hi"})] [(text "done")]])
+        fp (fake-provider [[(tool-use "t1" "execute_form" {:code "(sys/sh \"echo hi\")"})] [(text "done")]])
         {:keys [code out]} (run-bba dirs fp ["-p" "say hi"])
         calls @(:calls fp)]
     (is (= 0 code))
     (is (= "done" (str/trim out)))
     (is (= 2 (count calls)))
+    (is (= #{"develop_form" "execute_form"} (tool-names (first calls))) "the world tools are the only tools")
     (let [[r] (tool-results (second calls))]
       (is (= "t1" (:tool_use_id r)))
       (is (str/includes? (:content r) "hi"))
@@ -93,14 +96,17 @@
     (is (= "cba" (:content (first (tool-results c2)))))))
 
 (def reverse-src (slurp (str (fs/path root "extensions" "reverse.clj"))))
+
 (def hello-cmd-src
   "(ns bba.extensions.hello (:require [bba.ext :as ext]))
    (ext/register-command! \"hello\" (fn [args _] (println (str \"hello \" args))))")
 
 (deftest ac3-self-improvement-with-reload
   (let [dirs (temp-dirs)
-        fp (fake-provider [[(tool-use "w1" "write" {:path ".bba/extensions/reverse.clj" :content reverse-src})
-                            (tool-use "w2" "write" {:path ".bba/extensions/hello.clj" :content hello-cmd-src})]
+        ext-dir (str (fs/path (:cwd dirs) ".bba" "extensions"))
+        write-ext (fn [f src] (pr-str (list 'do (list 'fs/create-dirs ext-dir) (list 'spit (str ext-dir "/" f) src))))
+        fp (fake-provider [[(tool-use "w1" "execute_form" {:code (write-ext "reverse.clj" reverse-src)})
+                            (tool-use "w2" "execute_form" {:code (write-ext "hello.clj" hello-cmd-src)})]
                            [(text "written")]
                            [(text "now I have reverse")]])
         {:keys [code out]} (run-bba dirs fp [] :input "add a reverse tool\n/hello world\n/reload\n/hello world\nuse it\n/quit\n")
@@ -117,7 +123,7 @@
         sentinel (str (fs/path (:base dirs) "x"))
         _ (fs/create-dirs sentinel)
         _ (copy-ext (:cwd dirs) "block_rm_rf.clj")
-        fp (fake-provider [[(tool-use "b1" "bash" {:command (str "rm -rf " sentinel)})] [(text "ok")]])
+        fp (fake-provider [[(tool-use "b1" "execute_form" {:code (str "(sys/sh \"rm -rf " sentinel "\")")})] [(text "ok")]])
         {:keys [code]} (run-bba dirs fp ["-p" "delete it"])
         [r] (tool-results (second @(:calls fp)))]
     (is (= 0 code))
@@ -163,7 +169,8 @@
 ;; NFR: core < 500 lines. Since 2026-10-07 "core" means the agent kernel (loop, extension API,
 ;; built-in tools), as in pi. Providers (provider, openai) and the terminal UI (main, tui, ui)
 ;; are layers on top and are reported, not limited.
-(def kernel-files ["core.clj" "ext.clj" "tools.clj"])
+
+(def kernel-files ["core.clj" "ext.clj"])
 
 (defn- lines-in [names] (reduce + (map #(count (str/split-lines (slurp (str (fs/path root "src" "bba" %))))) names)))
 
@@ -175,12 +182,10 @@
 
 (deftest ac8-tool-errors-are-results
   (let [dirs (temp-dirs)
-        _ (fs/create-dirs (:cwd dirs))
-        _ (spit (str (fs/path (:cwd dirs) "f.txt")) "aaa")
         fp (fake-provider [[(tool-use "u1" "nope" {})
-                            (tool-use "e1" "edit" {:path "f.txt" :old "zzz" :new "y"})
-                            (tool-use "e2" "edit" {:path "f.txt" :old "a" :new "y"})
-                            (tool-use "m1" "read" {})]
+                            (tool-use "m1" "execute_form" {})
+                            (tool-use "x1" "execute_form" {:code "(/ 1 0)"})
+                            (tool-use "d1" "execute_form" {:code "(def sneaky 1)"})]
                            [(text "done")]])
         {:keys [code]} (run-bba dirs fp ["-p" "x"])
         rs (tool-results (second @(:calls fp)))]
@@ -188,10 +193,9 @@
     (is (= 4 (count rs)))
     (is (every? :is_error rs))
     (is (str/includes? (:content (nth rs 0)) "unknown tool"))
-    (is (str/includes? (:content (nth rs 1)) "not found"))
-    (is (str/includes? (:content (nth rs 2)) "not unique"))
-    (is (str/includes? (:content (nth rs 3)) "missing input: path"))
-    (is (= "aaa" (slurp (str (fs/path (:cwd dirs) "f.txt")))))))
+    (is (str/includes? (:content (nth rs 1)) "missing input: code"))
+    (is (str/includes? (:content (nth rs 2)) "Divide by zero"))
+    (is (str/includes? (:content (nth rs 3)) "must not define vars"))))
 
 (deftest ac9-entry-point-name
   (is (fs/exists? (fs/path root "bin" "bba")))
@@ -199,40 +203,12 @@
 
 (deftest max-turns-bound
   (let [dirs (temp-dirs)
-        loop-reply [(tool-use "l" "bash" {:command "true"})]
+        loop-reply [(tool-use "l" "execute_form" {:code "(+ 1 1)"})]
         fp (fake-provider (repeat 10 loop-reply))
         {:keys [code out]} (run-bba dirs fp ["-p" "x" "--max-turns" "3"])]
     (is (= 1 code))
     (is (= 3 (count @(:calls fp))))
     (is (str/includes? out "max turns"))))
-
-(deftest builtin-tools
-  (let [dir (:base (temp-dirs)) ctx {:cwd dir}]
-    (testing "write creates parents, read reads, offset/limit"
-      (is (str/includes? (tools/write-tool {:path "a/b.txt" :content "1\n2\n3\n4"} ctx) "wrote"))
-      (is (= "1\n2\n3\n4" (tools/read-tool {:path "a/b.txt"} ctx)))
-      (is (str/starts-with? (tools/read-tool {:path "a/b.txt" :offset 2 :limit 2} ctx) "2\n3\n[truncated")))
-    (testing "read errors"
-      (is (:is-error (tools/read-tool {:path "missing"} ctx)))
-      (fs/write-bytes (fs/path dir "bin.dat") (byte-array [65 0 66]))
-      (is (str/includes? (:content (tools/read-tool {:path "bin.dat"} ctx)) "binary")))
-    (testing "edit replaces exactly once, literal text"
-      (spit (str (fs/path dir "e.txt")) "x $1 y")
-      (is (= "edited e.txt" (tools/edit-tool {:path "e.txt" :old "$1" :new "\\0"} ctx)))
-      (is (= "x \\0 y" (slurp (str (fs/path dir "e.txt"))))))
-    (testing "bash exit code and stderr"
-      (let [r (tools/bash-tool {:command "echo out; echo err >&2; exit 3"} ctx)]
-        (is (:is-error r))
-        (is (str/includes? (:content r) "out"))
-        (is (str/includes? (:content r) "err"))
-        (is (str/includes? (:content r) "[exit 3]"))))
-    (testing "bash timeout kills the command and keeps partial output"
-      (let [t0 (System/currentTimeMillis)
-            r (tools/bash-tool {:command "echo early; sleep 30" :timeout 1} ctx)]
-        (is (< (- (System/currentTimeMillis) t0) 10000))
-        (is (:is-error r))
-        (is (str/includes? (:content r) "early"))
-        (is (str/includes? (:content r) "timed out"))))))
 
 (deftest agents-md-in-system-prompt
   (let [{:keys [cwd home]} (temp-dirs)]
@@ -260,7 +236,7 @@
   (let [{:keys [cwd home]} (temp-dirs)
         ctx {:cwd cwd :home home}
         f (str (fs/path cwd ".bba" "extensions" "r.clj"))]
-    (tools/register-builtins!)
+    (binding [ext/*source* :builtin] (ext/register-tool! {:name "execute_form" :handler (fn [_ _] "ok")}))
     (fs/create-dirs (fs/parent f))
     (spit f reverse-src)
     (core/load-extensions! ctx)
@@ -268,19 +244,22 @@
     (spit f "(ns broken")
     (binding [*err* (java.io.StringWriter.)] (core/load-extensions! ctx))
     (is (nil? (ext/tool "reverse")))
-    (is (ext/tool "bash") "built-ins survive reload")))
+    (is (ext/tool "execute_form") "built-ins survive reload")))
 
 (deftest hook-error-fails-closed-and-override-warns
-  (tools/register-builtins!)
-  (let [err (java.io.StringWriter.)]
-    (binding [*err* err ext/*source* "/x/ext.clj"]
-      (ext/on! :tool-call (fn [_ _] (throw (Exception. "boom"))))
-      (ext/register-tool! {:name "read" :handler (fn [_ _] "mine")}))
-    (is (str/includes? (str err) "replaces :builtin"))
-    (let [r (binding [*err* (java.io.StringWriter.)]
-              (core/run-tool {:id "1" :name "bash" :input {:command "echo should-not-run"}} {:cwd "."}))]
-      (is (:is_error r))
-      (is (str/includes? (:content r) "hook error in /x/ext.clj: boom")))))
+  (let [ran (atom false)]
+    (binding [ext/*source* :builtin] (ext/register-tool! {:name "execute_form" :handler (fn [_ _] (reset! ran true) "ran")}))
+    (let [err (java.io.StringWriter.)]
+      (binding [*err* err ext/*source* "/x/ext.clj"]
+        (ext/on! :tool-call (fn [_ _] (throw (Exception. "boom"))))
+        (ext/register-tool! {:name "develop_form" :handler (fn [_ _] "mine")})
+        (ext/register-tool! {:name "execute_form" :handler (fn [_ _] "mine")}))
+      (is (str/includes? (str err) "replaces :builtin"))
+      (let [r (binding [*err* (java.io.StringWriter.)]
+                (core/run-tool {:id "1" :name "execute_form" :input {:code "(+ 1 1)"}} {:cwd "."}))]
+        (is (:is_error r))
+        (is (str/includes? (:content r) "hook error in /x/ext.clj: boom"))
+        (is (not @ran))))))
 
 (deftest anthropic-request-shape
   (let [{:keys [uri headers body]}
@@ -379,3 +358,19 @@
     (is (= 0 (:exit r)))
     (is (str/includes? (:out r) "usage: bba"))
     (is (< ms 5000))))
+
+(deftest sys-sh-helper
+  (let [dir (:base (temp-dirs))]
+    (testing "exit code and stderr"
+      (let [r (sys/sh "echo out; echo err >&2; exit 3" {:dir dir})]
+        (is (str/includes? r "out"))
+        (is (str/includes? r "err"))
+        (is (str/includes? r "[exit 3]"))))
+    (testing "runs in :dir"
+      (is (= (str (fs/canonicalize dir)) (str (fs/canonicalize (str/trim (sys/sh "pwd" {:dir dir})))))))
+    (testing "timeout kills the command and keeps partial output"
+      (let [t0 (System/currentTimeMillis)
+            r (sys/sh "echo early; sleep 30" {:dir dir :timeout-s 1})]
+        (is (< (- (System/currentTimeMillis) t0) 10000))
+        (is (str/includes? r "early"))
+        (is (str/includes? r "timed out"))))))

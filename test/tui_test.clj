@@ -10,12 +10,13 @@
             [bba.main :as main]
             [bba.openai :as openai]
             [bba.provider :as provider]
-            [bba.tools :as tools]
+            [bba.sys :as sys]
             [bba.tui :as tui]))
 
 (use-fixtures :each (fn [t] (ext/reset-all!) (t) (ext/reset-all!)))
 
 (defn- keys->state [st ks] (reduce tui/handle-key st ks))
+
 (defn- typed [s] (map (fn [c] [:insert (str c)]) s))
 
 ;; ---------------------------------------------------------------- editor keys
@@ -138,8 +139,11 @@
 ;; ---------------------------------------------------------------- resume
 
 (def u (core/user-message "q"))
+
 (def answer {:role "assistant" :content [{:type "text" :text "a"}]})
+
 (def use {:role "assistant" :content [{:type "tool_use" :id "t" :name "bash" :input {}}]})
+
 (def result {:role "user" :content [{:type "tool_result" :tool_use_id "t" :content "ok"}]})
 
 (deftest replayable-drops-incomplete-turns
@@ -166,15 +170,13 @@
 
 ;; ---------------------------------------------------------------- cancel
 
-(deftest interrupt-stops-a-bash-tool-call
-  (tools/register-builtins!)
+(deftest interrupt-stops-a-shell-command
   (let [out (promise)
         t0 (System/currentTimeMillis)
-        th (Thread. #(deliver out (try (core/run-tool {:id "x" :name "bash" :input {:command "sleep 20"}}
-                                                      {:cwd (str (fs/cwd))})
+        th (Thread. #(deliver out (try (sys/sh "sleep 20")
                                        (catch InterruptedException _ ::interrupted))))]
     (.start th)
     (Thread/sleep 300)
     (.interrupt th)
-    (is (= ::interrupted (deref out 5000 ::timeout)) "the interrupt reaches the caller, not a tool_result")
+    (is (= ::interrupted (deref out 5000 ::timeout)) "the interrupt reaches the caller")
     (is (< (- (System/currentTimeMillis) t0) 5000))))

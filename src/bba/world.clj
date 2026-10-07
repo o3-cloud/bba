@@ -69,7 +69,8 @@
     (remove-ns n)
     (let [w (create-ns n)]
       (binding [*ns* w]
-        (load-string "(clojure.core/require '[clojure.string :as str] '[clojure.set :as set])")
+        (load-string (str "(clojure.core/require '[clojure.string :as str] '[clojure.set :as set]"
+                          " '[babashka.fs :as fs] '[bba.sys :as sys])"))
         (doseq [{:keys [source remove]} log]
           (if remove (ns-unmap w remove) (load-string source))))
       w)))
@@ -252,11 +253,14 @@
 
 ;; ---------------------------------------------------------------- prompt
 
-(defn system-prompt [_ctx]
+(defn system-prompt [ctx]
   (let [{:keys [ns-name adapter checks]} @state
         cat (catalogue)
         status (fn [cs k] (if (seq cs) (str/join ", " (map #(str (:name %) (if (:ok %) " ✓" " ✗")) cs)) (str "none " k)))]
-    (str "You are bba in world mode. You grow one live Clojure (babashka) namespace, `" ns-name "`, with no build step.\n"
+    (str "You are bba. You grow one live Clojure (babashka) namespace, `" ns-name "`, with no build step.\n"
+         "The world is your only tool: to read or change files or run commands, use execute_form with slurp, spit, "
+         "fs (babashka.fs) and (sys/sh \"command\") which returns stdout+stderr. Working folder: "
+         (or (:cwd ctx) (System/getProperty "user.dir")) ". File and process effects are not undone by a restore.\n"
          "Tools: develop_form {code, remove?} adds, redefines or removes definitions (defn, def, defonce). "
          "execute_form {code} only calls existing functions; it must not def anything. "
          "Available tools: " (str/join ", " (sort (map :name (ext/tools)))) ".\n"
@@ -264,7 +268,7 @@
          "last accepted state and you get an EDN result with :status, :message, :failed or :form. Read it, fix with "
          "develop_form, and retry. This is not Common Lisp: there are no restarts. Results are EDN.\n"
          "Put side effects in execute_form, not develop_form (develop forms are replayed on restore). "
-         "Do not use ns or in-ns. clojure.string is aliased as str.\n"
+         "Do not use ns or in-ns. Aliases: str (clojure.string), set, fs (babashka.fs), sys (bba.sys).\n"
          "Invariants (must hold): " (status (or (:invariants checks) (map #(assoc % :ok false) (:invariants adapter))) "") "\n"
          "Goals: " (status (:goals checks) "") "\n"
          "Functions (" (count cat) "):"

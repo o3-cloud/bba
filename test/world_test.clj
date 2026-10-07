@@ -183,7 +183,7 @@
         {:keys [code out err]} (run-bba cwd ["--world"]
                                         :input (str "/develop " rev-src "\n/execute (reverse-string \"xy\")\n/status\n"))]
     (is (= 0 code))
-    (is (str/includes? err "ANTHROPIC_API_KEY is not set; world mode: manual /commands only"))
+    (is (str/includes? err "ANTHROPIC_API_KEY is not set; manual /commands only"))
     (is (str/includes? out "accepted: revision 1"))
     (is (str/includes? out "=> \"yx\""))
     (is (str/includes? out "revision 2"))
@@ -191,9 +191,11 @@
   (testing "-p --world without a key still exits 1"
     (let [cwd (temp-cwd)]
       (is (= 1 (:code (run-bba cwd ["--world" "-p" "hi"]))))))
-  (testing "no key, non-world interactive still exits 1 (R9)"
-    (let [cwd (temp-cwd)]
-      (is (= 1 (:code (run-bba cwd [] :input "/help\n")))))))
+  (testing "the world is the only mode: no flag needed, manual commands still work"
+    (let [cwd (temp-cwd)
+          {:keys [code out]} (run-bba cwd [] :input (str "/develop " rev-src "\n/execute (reverse-string \"ab\")\n"))]
+      (is (= 0 code))
+      (is (str/includes? out "=> \"ba\"")))))
 
 (deftest s9-half-written-revision-never-current
   (let [cwd (temp-cwd) dir (wdir cwd) _ (start cwd)]
@@ -240,7 +242,7 @@
     (is (= 0 code))
     (is (= "done" (str/trim out)) "-p output is only the answer")
     (is (= #{"develop_form" "execute_form"} (set (map :name (:tools (first calls))))) "only the two world tools")
-    (is (str/includes? (:system (first calls)) "world mode"))
+    (is (str/includes? (:system (first calls)) "The world is your only tool"))
     (let [r1 (edn/read-string (:content (results 1)))]
       (is (true? (:is_error (results 1))))
       (is (= "Divide by zero" (:message r1)) "error returned to the model")

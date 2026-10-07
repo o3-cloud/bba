@@ -31,6 +31,11 @@
        (agents-md home)
        (agents-md cwd)))
 
+(defn prompt-for
+  "The system prompt: a layer may replace the base text (:system-prompt); AGENTS.md is always added."
+  [{:keys [home cwd] :as ctx}]
+  (if-let [f (:system-prompt ctx)] (str (f ctx) (agents-md home) (agents-md cwd)) (system-prompt ctx)))
+
 (defn tool-specs []
   (->> (ext/tools)
        (sort-by :name)
@@ -132,7 +137,7 @@
         {:status :max-turns :messages messages
          :text (str "stopped: reached max turns (" max-turns ")")}
         (let [_ (when-let [f (:on-request ctx)] (f))
-              reply (call (cond-> {:messages messages :system ((or (:system-prompt ctx) system-prompt) ctx) :tools (tool-specs)}
+              reply (call (cond-> {:messages messages :system (prompt-for ctx) :tools (tool-specs)}
                              (:on-text ctx) (assoc :on-text (:on-text ctx))))
               amsg {:role "assistant" :content (:content reply)}
               uses (filter #(= "tool_use" (:type %)) (:content reply))
