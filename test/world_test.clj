@@ -312,6 +312,19 @@
     (testing "world aliases resolve"
       (is (nil? (:lint (execute "(str/upper-case (fs/file-name \"a/b\"))")))))))
 
+(deftest library-aliases-survive-restores
+  (let [cwd (temp-cwd) _ (start cwd)
+        code "[(json/generate-string {:a 1}) (count (csv/read-csv \"a,b\")) (edn/read-string \"1\")
+               (some? http/get) (some? yaml/parse-string) (some? io/file) (some? walk/keywordize-keys)
+               (some? pp/pprint) (some? proc/process)]"
+        expected "[\"{\\\"a\\\":1}\" 1 1 true true true true true true]"]
+    (let [r (execute code)]
+      (is (= :accepted (:status r)))
+      (is (= expected (:value r)))
+      (is (nil? (:lint r)) "clj-kondo knows every alias"))
+    (is (= :error (:status (execute "(throw (ex-info \"boom\" {}))"))) "forces a restore")
+    (is (= expected (:value (execute code))) "aliases are back after the restore")))
+
 (deftest lint-warn-and-off
   (doseq [mode [:warn :off]]
     (let [cwd (temp-cwd) _ (adapter! cwd {:lint mode}) _ (start cwd)

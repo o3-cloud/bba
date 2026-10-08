@@ -66,9 +66,18 @@
                  (catch Exception _ nil))]
     (ex-info (str "API error " status ": " (or msg body)) {:status status})))
 
+(defn- maybe-dump-request!
+  "When BBA_DEBUG_REQUEST names a file, write the JSON body there before sending,
+  so a request the server rejects can be inspected. Best-effort; never throws."
+  [body]
+  (when-let [path (not-empty (System/getenv "BBA_DEBUG_REQUEST"))]
+    (try (spit path (json/generate-string body {:pretty true}))
+         (catch Exception _ nil))))
+
 (defn- post-json
   "POST the request; return the parsed JSON body or throw a readable error."
   [{:keys [uri headers body]}]
+  (maybe-dump-request! body)
   (let [resp (try (http/post uri {:headers headers :body (json/generate-string body) :throw false})
                   (catch java.net.ConnectException _
                     (throw (ex-info (str "cannot connect to " uri) {}))))]
@@ -85,6 +94,7 @@
 (defn- post-stream
   "POST with stream=true; fold each event with (step acc event) from `init`. Returns the folded value."
   [{:keys [uri headers body]} step init]
+  (maybe-dump-request! (assoc body :stream true))
   (let [resp (try (http/post uri {:headers headers :body (json/generate-string (assoc body :stream true))
                                   :as :stream :throw false})
                   (catch java.net.ConnectException _

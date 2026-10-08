@@ -5,7 +5,8 @@
   (:require [babashka.fs :as fs]
             [babashka.pods :as pods]
             [clojure.string :as str]
-            [bba.ext :as ext]))
+            [bba.ext :as ext]
+            [bba.sys :as sys]))
 
 (def pod-version "2025.06.05")
 
@@ -33,8 +34,7 @@
 (defn header
   "The ns form clj-kondo sees: the world namespace with the aliases replay! requires."
   [ns-name]
-  (str "(ns " ns-name " (:require [clojure.string :as str] [clojure.set :as set]"
-       " [babashka.fs :as fs] [bba.sys :as sys]))\n"))
+  (str "(ns " ns-name " (:require " (str/join " " (map pr-str sys/world-requires)) "))\n"))
 
 (defn lint
   "Lint `code` as it would run in namespace `ns-name` after the forms in `context`

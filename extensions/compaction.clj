@@ -80,6 +80,21 @@
 
 (defn- has-block? [m t] (boolean (some #(= t (:type %)) (blocks m))))
 
+(defn- tool-result-only?
+  "A user message that carries only tool results. Its matching tool_use lives in
+  the preceding assistant turn, so it must never lead a compacted view: a
+  tool_result whose tool_use was folded into the summary becomes a
+  function_call_output with no function_call, which the provider rejects."
+  [m]
+  (and (= "user" (:role m)) (has-block? m "tool_result") (not (has-block? m "text"))))
+
+(defn pair-safe-tail
+  "Drop leading tool-result-only messages so a compacted middle never begins mid
+  tool-pair. Those results are already covered by the summary that replaced their
+  tool_use, so dropping them loses nothing."
+  [msgs]
+  (vec (drop-while tool-result-only? msgs)))
+
 (defn user-text? [m] (and (= "user" (:role m)) (not (has-block? m "tool_result"))))
 
 (defn final-answer? [m] (and (= "assistant" (:role m)) (not (has-block? m "tool_use"))))
@@ -355,7 +370,7 @@ New transcript to merge:
                                                                   "(" folded " older messages, folded forward; "
                                                                   "the summary is rewritten in place)\n\n" summary)})))
                                 head-msg)]
-                             (subvec mid-msgs folded)
+                             (pair-safe-tail (subvec mid-msgs folded))
                              (apply concat tail)))]
               (cond
                 (empty? summary) req           ; fold failed: send everything

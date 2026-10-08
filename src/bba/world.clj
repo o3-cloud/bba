@@ -11,6 +11,7 @@
             [rewrite-clj.parser :as rp]
             [bba.ext :as ext]
             [bba.lint :as lint]
+            [bba.sys :as sys]
             [bba.ui :as ui]
             [bba.world-store :as store]))
 
@@ -91,8 +92,7 @@
     (remove-ns n)
     (let [w (create-ns n)]
       (binding [*ns* w]
-        (load-string (str "(clojure.core/require '[clojure.string :as str] '[clojure.set :as set]"
-                          " '[babashka.fs :as fs] '[bba.sys :as sys])"))
+        (apply require sys/world-requires)
         (doseq [{:keys [source remove]} log]
           (if remove (ns-unmap w remove) (load-string source))))
       w)))
@@ -295,11 +295,16 @@
         status (fn [cs k] (if (seq cs) (str/join ", " (map #(str (:name %) (if (:ok %) " ✓" " ✗")) cs)) (str "none " k)))]
     (str "You are bba. You grow one live Clojure (babashka) namespace, `" ns-name "`, with no build step. "
          "This is world " (pr-str (:name @state)) "; the user can switch worlds with /world, and each world has its own functions.\n"
-         "The world is your only tool: to read or change files or run commands, use execute_form with slurp, spit, "
-         "fs (babashka.fs) and (sys/sh \"command\") which returns stdout+stderr. Working folder: "
+         "The world is your only tool. Think in Clojure data, not shell text. Prefer, in order: "
+         "(1) world functions; (2) Clojure and the aliases: (fs/glob \".\" \"**.clj\") not find, re-seq and str/ not grep or sed, "
+         "(http/get url) and (json/parse-string s true) not curl or jq, csv/read-csv not awk, (json/generate-string m {:pretty true}) with spit to write; "
+         "(3) (sys/sh \"command\") only for real external programs (git, npm, test runners, kubectl). It returns stdout+stderr as one string, "
+         "already runs in the working folder, and takes {:dir d}: never cd. Working folder: "
          (or (:cwd ctx) (System/getProperty "user.dir")) ". File and process effects are not undone by a restore.\n"
+         "execute_form evaluates any expression: write ->> pipelines that read, filter and reshape data, and return data (maps, vectors), not printed text.\n"
+         "Grow the world: when you do something twice, or the user will want it again, develop_form it as a small function with a docstring, then call it.\n"
          "Tools: develop_form {code, remove?} adds, redefines or removes definitions (defn, def, defonce). "
-         "execute_form {code} only calls existing functions; it must not def anything. "
+         "execute_form {code} evaluates any expression against the world; it must not def anything. "
          "Available tools: " (str/join ", " (sort (map :name (ext/tools)))) ".\n"
          "Every attempt runs against a checkpoint. On any error or failed invariant the world is restored to the "
          "last accepted state and you get an EDN result with :status, :message, :failed or :form. Read it, fix with "
@@ -308,7 +313,8 @@
          ":status :rejected :reason :lint with :lint findings ({:row :col :message}, rows within your code); "
          "warnings come back as :lint on an accepted result.\n"
          "Put side effects in execute_form, not develop_form (develop forms are replayed on restore). "
-         "Do not use ns or in-ns. Aliases: str (clojure.string), set, fs (babashka.fs), sys (bba.sys).\n"
+         "Do not use ns, in-ns or require; these aliases are always loaded: "
+         (str/join ", " (map (fn [[lib _ a]] (str a " (" lib ")")) sys/world-requires)) ".\n"
          "Invariants (must hold): " (status (or (:invariants checks) (map #(assoc % :ok false) (:invariants adapter))) "") "\n"
          "Goals: " (status (:goals checks) "") "\n"
          "Functions (" (count cat) "):"
@@ -377,7 +383,7 @@
 
 (def ^:private tool-desc
   {"develop_form" "Add, redefine or remove definitions in the live world namespace. code: one or more Clojure forms (defn, def, defonce). remove: names to remove. All or nothing: any error or failed invariant restores the last accepted state. Returns EDN."
-   "execute_form" "Call or compose existing world functions. code: one or more forms; the printed value of the last is returned. Must not def or redefine vars. Errors restore the last accepted state. Returns EDN."})
+   "execute_form" "Evaluate any Clojure expression against the world: call world functions, or compose Clojure and the preloaded aliases over data. code: one or more forms; the printed value of the last is returned. Must not def or redefine vars. Errors restore the last accepted state. Returns EDN."})
 
 (defn- tool-result [r] {:content (pr-str r) :is-error (not (#{:accepted :preview} (:status r)))})
 

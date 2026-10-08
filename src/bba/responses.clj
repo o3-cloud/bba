@@ -85,12 +85,19 @@
   returning an empty message that would look like a finished turn."
   [{:keys [text calls incomplete]}]
   (let [calls (vals calls)]
-    (when (and incomplete (str/blank? text) (empty? calls))
-      (throw (ex-info (str "no answer from the model (" incomplete "): "
-                           (if (= incomplete "max_output_tokens")
-                             "it ran out of room while thinking, so try a shorter question or a lower reasoning effort"
-                             "the server stopped before producing an answer"))
-                      {:incomplete incomplete})))
+    (when (and (str/blank? text) (empty? calls))
+      (throw (ex-info (if incomplete
+                        (str "no answer from the model (" incomplete "): "
+                             (if (= incomplete "max_output_tokens")
+                               "it ran out of room while thinking, so try a shorter question or a lower reasoning effort"
+                               "the server stopped before producing an answer"))
+                        ;; No text and no tool call, yet the stream ended cleanly:
+                        ;; usually a reasoning-only turn. Returning an empty
+                        ;; assistant message here would look like a finished answer
+                        ;; and, once logged, leave a `content: []` turn in the
+                        ;; session. Fail the turn instead.
+                        "no answer from the model: the server streamed an empty response (no text and no tool call)")
+                      (cond-> {} incomplete (assoc :incomplete incomplete)))))
     {:role "assistant"
      :stop_reason (if (seq calls) "tool_use" "end_turn")
      :content (into (if (str/blank? text) [] [{:type "text" :text text}])

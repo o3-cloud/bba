@@ -195,6 +195,16 @@
                        {:type "response.incomplete"
                         :response {:incomplete_details {:reason "max_output_tokens"}}}])]
       (is (= [{:type "text" :text "partial answer"}] (:content (responses/reply-of-stream acc))))))
+  (testing "a clean stream with neither text nor a tool call throws, not an empty turn"
+    ;; A reasoning-only turn ends the stream with no output_text and no
+    ;; function_call. Returning {:content []} here would look like a finished
+    ;; answer and leave a `content: []` turn in the session.
+    (let [acc (reduce #(responses/chunk-step %1 %2 nil) responses/stream-init
+                      [{:type "response.created"} {:type "response.completed"}])]
+      (is (str/includes? (try (responses/reply-of-stream acc) nil
+                              (catch Exception e (ex-message e)))
+                         "empty response")
+          "the caller is told, not handed an empty message")))
   (testing "an error event throws"
     (is (= "API error: rate limited"
            (try (responses/chunk-step responses/stream-init

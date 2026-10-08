@@ -389,6 +389,20 @@
     (is (str/includes? (:out (run-bba dirs fp ["-p" "x"])) "SESSION-START"))
     (is (not (str/includes? (:out (run-bba dirs fp ["-p" "x" "--no-extensions"])) "SESSION-START")))))
 
+(deftest hook-registrations-belong-to-their-extension
+  (let [{:keys [cwd home]} (temp-dirs)
+        ctx {:cwd cwd :home home}
+        f (str (fs/path cwd ".bba" "extensions" "late.clj"))]
+    (fs/create-dirs (fs/parent f))
+    (spit f "(ns bba.extensions.late (:require [bba.ext :as ext]))
+             (ext/on! :session-start (fn [_ _] (ext/register-tool! {:name \"late\" :handler (fn [_ _] \"ok\")})))")
+    (core/load-extensions! ctx)
+    (ext/emit :session-start {} ctx)
+    (is (= f (:source (ext/tool "late"))) "tagged with the extension file, not :builtin")
+    (fs/delete f)
+    (core/load-extensions! ctx)
+    (is (nil? (ext/tool "late")) "removed when the extension is gone")))
+
 (deftest nfr4-startup-time
   ;; Measures, does not tune: generous bound (one sample is noisy).
   (let [t0 (System/currentTimeMillis)

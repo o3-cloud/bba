@@ -62,10 +62,11 @@
 (defn provider [] (get-in @registry [:provider :fn]))
 
 (defn emit
-  "Run every hook for a non-guard event. Hook errors warn and are ignored (fail-open)."
+  "Run every hook for a non-guard event. Hook errors warn and are ignored (fail-open).
+  A hook runs as its own file, so what it registers is removed on /reload."
   [event payload ctx]
   (doseq [{:keys [handler source]} (hooks event)]
-    (try (handler payload ctx)
+    (try (binding [*source* source] (handler payload ctx))
          (catch Exception e (warn "hook " event " in " source " failed: " (ex-message e))))))
 
 (defn- builtin? [v] (= :builtin (:source v)))
