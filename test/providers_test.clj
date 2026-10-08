@@ -162,7 +162,7 @@
                                          "/provider nope" "/provider openai" "/model" "/quit"])]
     (is (= 0 code))
     (is (str/includes? out "provider: anthropic, model: claude-opus-5-5") "banner and /provider show the start state")
-    (is (str/includes? out "providers: anthropic, ollama, openai, openrouter"))
+    (is (str/includes? out "providers: anthropic, codex, ollama, openai, openrouter"))
     (is (str/includes? out "provider: ollama, model: gpt-oss") "switch uses the new default model")
     (is (str/includes? out "provider: ollama, model: qwen3.5:0.8b"))
     (is (str/includes? err "unknown provider: nope"))

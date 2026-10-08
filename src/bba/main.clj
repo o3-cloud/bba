@@ -10,7 +10,7 @@
             [bba.world :as world]
             [bba.world-store :as store]))
 
-(def usage (str "usage: bba [-p PROMPT] [-c] [--world NAME] [--provider anthropic|openai|openrouter|ollama] [--model NAME]"
+(def usage (str "usage: bba [-p PROMPT] [-c] [--world NAME] [--provider anthropic|openai|openrouter|ollama|codex] [--model NAME]"
                 " [--max-turns N] [--no-extensions]"))
 
 (defn parse-args [args]

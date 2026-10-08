@@ -34,6 +34,9 @@ The command is `bba`, so it does not hide the babashka `bb` command.
    export OPENROUTER_API_KEY=...
    ```
 
+   If you already use the Codex CLI, you can skip the key and bill a ChatGPT
+   subscription instead: `bba --provider codex`. See [Codex](#codex-use-a-chatgpt-subscription-instead-of-an-api-key).
+
 4. Start bba in a project folder:
 
    ```bash
@@ -176,6 +179,7 @@ If stdin is a pipe, bba reads plain lines and prints only whole answers, so you 
 | `BBA_SKILLS_TRUST=1` | Trust this project's skill folders (`.agents/skills`, `.bba/skills`). |
 | `BBA_SKILLS_EXTRA` | More skill folders, separated by `:`. |
 | `BBA_MCP_TRUST=1` | Trust this project's `.bba/mcp.json` (the MCP extension). |
+| `CODEX_HOME`, `CODEX_ACCESS_TOKEN`, `CODEX_BASE_URL` | Where the `codex` provider finds its subscription login, and its endpoint. See [Codex](#codex-use-a-chatgpt-subscription-instead-of-an-api-key). |
 | `NO_COLOR` | Plain output with no colors. |
 | `BBA_DEBUG=1` | Show stack traces. |
 
@@ -187,10 +191,31 @@ If stdin is a pipe, bba reads plain lines and prints only whole answers, so you 
 | `openrouter` | `OPENROUTER_API_KEY` | `anthropic/claude-opus-5.5` |
 | `openai` | `OPENAI_API_KEY` | `gpt-5` |
 | `ollama` | none | `gpt-oss` |
+| `codex` | none (`codex login`) | `gpt-5.6-luna` |
 
 To use another server with the OpenAI Chat Completions API, set `OPENAI_BASE_URL`. To use a remote Ollama server, set `OLLAMA_HOST`.
 
-Tested live: OpenRouter, with the world tools. Ollama was tested live before the world became the only mode. Anthropic and OpenAI are tested only against a local fake server.
+Tested live: OpenRouter and Codex, with the world tools. Ollama was tested live before the world became the only mode. Anthropic and OpenAI are tested only against a local fake server.
+
+### Codex: use a ChatGPT subscription instead of an API key
+
+The `codex` provider bills a ChatGPT plan instead of a metered API key. It needs no key of its own: it uses the login that the [Codex CLI](https://github.com/openai/codex) already made, read from `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`).
+
+```bash
+codex login              # once, if you have not already
+bba --provider codex
+```
+
+A ChatGPT plan covers the Codex endpoint but not the metered API — the two use different credentials and different billing — so `codex` is a separate provider rather than a `OPENAI_BASE_URL` setting.
+
+What to know:
+
+- **It reads, it never writes.** bba does not refresh the token, because refreshing rotates a single-use refresh token and would sign the Codex CLI out. When the token expires (about three days), run `codex login` again and restart bba.
+- **The endpoint always streams, and it speaks the Responses API,** not Chat Completions. `bba.responses` translates between the two.
+- **A reply that runs out of room is an error, not an empty answer.** The endpoint spends part of the reply budget thinking, so a hard question can come back with nothing but `incomplete: max_output_tokens`. bba says so rather than printing a blank line as if it had finished.
+- **Model names differ from the API.** Use the names the Codex CLI uses (`gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-6-astra`); a metered-API name such as `gpt-5` is refused with \"not supported when using Codex with a ChatGPT account\". `bba --provider codex` shows the default.
+- **`CODEX_BASE_URL` and `CODEX_ACCESS_TOKEN`** override the endpoint and the token (for a proxy, or for CI).
+- This endpoint is not a published API and the plan's rate limits apply. Treat it as convenient, not contractual.
 
 ## Extensions
 
@@ -292,6 +317,7 @@ bb agent       # run bba from source
 | `src/bba/core.clj`, `ext.clj` | Kernel: the agent loop and the extension API. The tests keep it under 500 lines. |
 | `src/bba/world.clj`, `world_store.clj`, `sys.clj`, `lint.clj` | The world: evaluator, checkpoints, named worlds, revisions, `sys/sh` and the clj-kondo check. |
 | `src/bba/provider.clj`, `openai.clj` | Providers and streaming. |
+| `src/bba/responses.clj`, `codex_auth.clj` | The `codex` provider: Responses API translation and the ChatGPT login. |
 | `src/bba/main.clj`, `tui.clj`, `ui.clj` | Command line, line editor, spinner and colors. |
 | `extensions/` | Core extensions: skills, MCP and compaction. |
 | `examples/` | Example extensions and an example `mcp.json`. |
