@@ -1,10 +1,13 @@
 (ns bba.provider
-  "Built-in providers: Anthropic (default), OpenAI, OpenRouter and Ollama. Pick one with BBA_PROVIDER."
+  "Built-in providers: Anthropic (default), OpenAI, OpenRouter, Ollama and Codex, which
+  uses a ChatGPT subscription. Pick one with BBA_PROVIDER."
   (:require [babashka.http-client :as http]
             [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [bba.openai :as openai]))
+            [bba.codex-auth :as codex-auth]
+            [bba.openai :as openai]
+            [bba.responses :as responses]))
 
 (def api-url "https://api.anthropic.com/v1/messages")
 (def default-model "claude-opus-5-5")
@@ -17,7 +20,11 @@
                  :path "/chat/completions"}
    "openrouter" {:key "OPENROUTER_API_KEY" :model "anthropic/claude-opus-5.5" :url "https://openrouter.ai/api/v1"
                  :url-env "OPENROUTER_BASE_URL" :path "/chat/completions"}
-   "ollama"     {:model "gpt-oss" :url "http://localhost:11434" :url-env "OLLAMA_HOST" :path "/v1/chat/completions"}})
+   "ollama"     {:model "gpt-oss" :url "http://localhost:11434" :url-env "OLLAMA_HOST" :path "/v1/chat/completions"}
+   ;; Codex uses a ChatGPT subscription, not a key: no :key, and bba reads the
+   ;; Codex CLI login. Its endpoint speaks the Responses API, not Chat Completions.
+   "codex"      {:model "gpt-5.6-luna" :url "https://chatgpt.com/backend-api/codex"
+                 :url-env "CODEX_BASE_URL" :api :responses}})
 
 (defn provider-name [env] (str/lower-case (or (not-empty (get env "BBA_PROVIDER")) "anthropic")))
 
@@ -25,8 +32,21 @@
   "nil when the selected provider can run, else an error message."
   [env]
   (let [n (provider-name env) {:keys [key] :as p} (providers n)]
-    (cond (nil? p) (str "unknown provider: " n " (use " (str/join ", " (sort (keys providers))) ")")
-          (and key (str/blank? (get env key))) (str key " is not set"))))
+    (cond
+      (nil? p)
+      (str "unknown provider: " n " (use " (str/join ", " (sort (keys providers))) ")")
+
+      (and key (str/blank? (get env key)))
+      (str key " is not set")
+
+      (= n "codex")
+      (let [t (codex-auth/access-token env)]
+        (cond (str/blank? t)
+              (str "no ChatGPT subscription found: sign in with the Codex CLI (codex login), "
+                   "then try again. bba reads " (codex-auth/auth-file env)
+                   ", or set CODEX_ACCESS_TOKEN")
+              (codex-auth/expired? t)
+              (str "the ChatGPT subscription token expired: run `codex login` to renew it"))))))
 
 (defn build-request
   "Pure: the HTTP request for one Messages API call."
@@ -46,9 +66,18 @@
                  (catch Exception _ nil))]
     (ex-info (str "API error " status ": " (or msg body)) {:status status})))
 
+(defn- maybe-dump-request!
+  "When BBA_DEBUG_REQUEST names a file, write the JSON body there before sending,
+  so a request the server rejects can be inspected. Best-effort; never throws."
+  [body]
+  (when-let [path (not-empty (System/getenv "BBA_DEBUG_REQUEST"))]
+    (try (spit path (json/generate-string body {:pretty true}))
+         (catch Exception _ nil))))
+
 (defn- post-json
   "POST the request; return the parsed JSON body or throw a readable error."
   [{:keys [uri headers body]}]
+  (maybe-dump-request! body)
   (let [resp (try (http/post uri {:headers headers :body (json/generate-string body) :throw false})
                   (catch java.net.ConnectException _
                     (throw (ex-info (str "cannot connect to " uri) {}))))]
@@ -65,6 +94,7 @@
 (defn- post-stream
   "POST with stream=true; fold each event with (step acc event) from `init`. Returns the folded value."
   [{:keys [uri headers body]} step init]
+  (maybe-dump-request! (assoc body :stream true))
   (let [resp (try (http/post uri {:headers headers :body (json/generate-string (assoc body :stream true))
                                   :as :stream :throw false})
                   (catch java.net.ConnectException _
@@ -131,10 +161,32 @@
                           (openai/stream-body (post-stream http-req #(openai/chunk-step %1 %2 on-text) openai/stream-init))
                           (post-json http-req)))))))
 
+(defn account-id
+  "The ChatGPT account id that goes with the Codex token, when the token names one."
+  [token]
+  (codex-auth/account-id token))
+
+(defn codex
+  "Return a provider fn for the Codex endpoint, authenticated by the ChatGPT
+  subscription that the Codex CLI signed in with. The endpoint always streams, so
+  unlike the other providers there is no non-streaming path."
+  [env]
+  (let [token (codex-auth/access-token env)]
+    (fn [{:keys [on-text] :as req}]
+      (let [http-req (responses/build-request req {:url (base-url env "codex")
+                                                   :access-token token
+                                                   :account-id (account-id token)
+                                                   :model (model env "codex")})]
+        (responses/reply-of-stream
+         (post-stream http-req #(responses/chunk-step %1 %2 on-text) responses/stream-init))))))
+
 (defn openai [env] (chat-completions "openai" env))
 (defn ollama [env] (chat-completions "ollama" env))
 (defn openrouter [env] (chat-completions "openrouter" env))
 
 (defn from-env [env]
   (let [n (provider-name env)]
-    (if (= n "anthropic") (anthropic env) (chat-completions n env))))
+    (case n
+      "anthropic" (anthropic env)
+      "codex" (codex env)
+      (chat-completions n env))))

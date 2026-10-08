@@ -9,17 +9,56 @@
             [bba.ext :as ext]))
 
 (def default-adapter
-  {:ns 'world :invariants [] :goals [] :timeout-ms 30000 :max-result-chars 4000})
+  {:ns 'world :invariants [] :goals [] :timeout-ms 30000 :max-result-chars 4000 :lint :reject})
 
 (def adapter-template
   (str ";; bba world adapter. Read as EDN data; the forms below are evaluated in the world namespace.\n"
        ";; :invariants must hold after every change (a failure rejects the change).\n"
        ";; :goals are reported as met / unmet and never reject a change.\n"
        ";; Example: {:name \"reverse works\" :form (= \"cba\" (reverse-string \"abc\"))}\n"
-       "{:ns world\n :invariants []\n :goals []\n :timeout-ms 30000\n :max-result-chars 4000}\n"))
+       ";; :lint runs clj-kondo on each form first: :reject (errors reject), :warn (report only) or :off.\n"
+       "{:ns world\n :invariants []\n :goals []\n :timeout-ms 30000\n :max-result-chars 4000\n :lint :reject}\n"))
 
-(defn world-dir [cwd] (str (fs/path cwd ".bba" "world")))
+;; ---------------------------------------------------------------- worlds
+
+(def default-world "main")
+
+(defn worlds-dir [cwd] (str (fs/path cwd ".bba" "worlds")))
+(defn world-dir
+  "The folder of world `name` (default main): .bba/worlds/<name>."
+  ([cwd] (world-dir cwd default-world))
+  ([cwd name] (str (fs/path (worlds-dir cwd) name))))
 (defn- f [dir & parts] (str (apply fs/path dir parts)))
+
+(defn valid-name?
+  "Lowercase letters and digits joined by single hyphens, at most 64 chars; not a /world subcommand."
+  [n]
+  (boolean (and (string? n) (<= 1 (count n) 64) (re-matches #"[a-z0-9]+(-[a-z0-9]+)*" n)
+                (not (#{"new" "fork"} n)))))
+
+(defn world-names
+  "Names of the worlds in this project (folders with a world.edn), sorted."
+  [cwd]
+  (let [d (worlds-dir cwd)]
+    (if (fs/directory? d)
+      (->> (fs/list-dir d)
+           (filter #(fs/exists? (fs/path % "world.edn")))
+           (map (comp str fs/file-name))
+           (filter valid-name?)
+           sort vec)
+      [])))
+
+(defn exists? [cwd name] (fs/exists? (fs/path (world-dir cwd name) "world.edn")))
+
+(defn active
+  "The world named in .bba/worlds/ACTIVE (the last one used), or nil."
+  [cwd]
+  (let [a (f (worlds-dir cwd) "ACTIVE")]
+    (when (fs/exists? a) (let [n (str/trim (slurp a))] (when (valid-name? n) n)))))
+
+(defn set-active! [cwd name]
+  (fs/create-dirs (worlds-dir cwd))
+  (spit (f (worlds-dir cwd) "ACTIVE") (str name "\n")))
 
 (defn ensure-dir!
   "Create the store folders, its .gitignore and a default adapter. Returns true when
@@ -124,6 +163,43 @@
   (let [lock (f dir "LOCK")]
     (when (and (fs/exists? lock) (= pid (str/trim (slurp lock))))
       (fs/delete-if-exists lock))))
+
+;; ---------------------------------------------------------------- migrate / fork
+
+(defn migrate!
+  "Move a single-world store (.bba/world/, before named worlds) to .bba/worlds/main/.
+  Returns true when it moved. Leaves it alone when main already exists, and throws
+  when a live process still holds its lock."
+  [cwd]
+  (let [old (str (fs/path cwd ".bba" "world")) new (world-dir cwd default-world)]
+    (when (fs/exists? (f old "world.edn"))
+      (if (fs/exists? new)
+        (do (ext/warn "both " old " and " new " exist; using " new " and leaving the old folder alone") false)
+        (do (when (fs/exists? (f old "LOCK"))
+              (let [pid (str/trim (slurp (f old "LOCK")))]
+                (when (alive? pid)
+                  (throw (ex-info (str "cannot move " old " to " new ": in use by pid " pid) {:pid pid})))
+                (fs/delete-if-exists (f old "LOCK"))))
+            (fs/create-dirs (worlds-dir cwd))
+            (fs/move old new)
+            (ext/warn "moved " old " to " new)
+            true)))))
+
+(defn fork!
+  "Create world dir `to` from revision `n` of world dir `from`: same adapter, and
+  revision 1 holds that revision's log and state. n = 0 forks an empty world."
+  [from to n from-name]
+  (when (fs/exists? to) (throw (ex-info (str "world already exists: " to) {})))
+  (let [src (when (pos? n) (or (read-rev from n) (throw (ex-info (str "unknown revision: " n) {}))))]
+    (fs/create-dirs (f to "revisions"))
+    (fs/copy (f from "world.edn") (f to "world.edn"))
+    (ensure-dir! to)
+    (when src
+      (publish! to (assoc src :rev 1 :base-rev 0 :type :fork :op-id (str (random-uuid))
+                          :ts (str (java.time.Instant/now)) :input (str "/world fork from " from-name " r" n)
+                          :forked-from {:world from-name :rev n} :rollback-of nil
+                          :log (mapv #(if (:rev %) (assoc % :rev 1) %) (:log src)))))
+    to))
 
 ;; ---------------------------------------------------------------- ops log
 

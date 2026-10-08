@@ -10,6 +10,8 @@
             [rewrite-clj.node :as rn]
             [rewrite-clj.parser :as rp]
             [bba.ext :as ext]
+            [bba.lint :as lint]
+            [bba.sys :as sys]
             [bba.ui :as ui]
             [bba.world-store :as store]))
 
@@ -48,6 +50,27 @@
         {:forms (mapv #(dissoc % :head) forms)}))
     (catch Exception e {:error {:status :error :class "reader" :message (ex-message e)}})))
 
+;; ---------------------------------------------------------------- lint
+
+(declare catalogue)
+
+(defn- lint-context
+  "Sources clj-kondo reads before the new code: the live definitions and the
+  non-def forms of the accepted log."
+  []
+  (let [log (get-in @state [:snapshot :log])
+        live (set (map :name (catalogue)))]
+    (for [{:keys [source defines remove]} log
+          :when (and source (not remove) (or (nil? defines) (live defines)))]
+      source)))
+
+(defn- lint-forms
+  "clj-kondo findings for `code`, or nil when the adapter has :lint :off or
+  clj-kondo is unavailable."
+  [code]
+  (when (not= :off (get-in @state [:adapter :lint]))
+    (lint/lint (:ns-name @state) (lint-context) code)))
+
 ;; ---------------------------------------------------------------- checkpoint / restore
 
 (defn- stateful? [x] (or (instance? clojure.lang.Atom x) (instance? clojure.lang.Volatile x)))
@@ -69,8 +92,7 @@
     (remove-ns n)
     (let [w (create-ns n)]
       (binding [*ns* w]
-        (load-string (str "(clojure.core/require '[clojure.string :as str] '[clojure.set :as set]"
-                          " '[babashka.fs :as fs] '[bba.sys :as sys])"))
+        (apply require sys/world-requires)
         (doseq [{:keys [source remove]} log]
           (if remove (ns-unmap w remove) (load-string source))))
       w)))
@@ -172,10 +194,24 @@
       (store/log-op! dir {:op-id (or (:op-id r) (str (random-uuid))) :op (name op) :outcome (outcome r) :ms (:ms r) :revision (:rev @state)}))
     r))
 
+(declare attempt-checked!)
+
 (defn attempt!
-  "The one evaluator path. `op` is :develop, :execute or :preview."
-  [{:keys [op code remove]}]
-  (let [t0 (now) removals (mapv symbol remove) parsed (parse-forms code)]
+  "The one evaluator path. `op` is :develop, :execute or :preview. clj-kondo runs
+  first: with adapter :lint :reject (the default) an error finding rejects the code
+  before it is evaluated; warnings come back as :lint on the result."
+  [{:keys [op code] :as in}]
+  (let [t0 (now) parsed (parse-forms code)
+        findings (when (and (not (:error parsed)) (seq (:forms parsed))) (lint-forms code))
+        errs (lint/errors findings)]
+    (if (and (seq errs) (= :reject (get-in @state [:adapter :lint])))
+      (finish op t0 {:status :rejected :reason :lint :lint errs
+                     :message "clj-kondo found errors; nothing was evaluated"})
+      (cond-> (attempt-checked! in t0 parsed)
+        (seq findings) (assoc :lint findings)))))
+
+(defn- attempt-checked! [{:keys [op code remove]} t0 parsed]
+  (let [removals (mapv symbol remove)]
     (cond
       (:error parsed) (finish op t0 (:error parsed))
       (and (empty? (:forms parsed)) (empty? removals))
@@ -257,18 +293,28 @@
   (let [{:keys [ns-name adapter checks]} @state
         cat (catalogue)
         status (fn [cs k] (if (seq cs) (str/join ", " (map #(str (:name %) (if (:ok %) " ✓" " ✗")) cs)) (str "none " k)))]
-    (str "You are bba. You grow one live Clojure (babashka) namespace, `" ns-name "`, with no build step.\n"
-         "The world is your only tool: to read or change files or run commands, use execute_form with slurp, spit, "
-         "fs (babashka.fs) and (sys/sh \"command\") which returns stdout+stderr. Working folder: "
+    (str "You are bba. You grow one live Clojure (babashka) namespace, `" ns-name "`, with no build step. "
+         "This is world " (pr-str (:name @state)) "; the user can switch worlds with /world, and each world has its own functions.\n"
+         "The world is your only tool. Think in Clojure data, not shell text. Prefer, in order: "
+         "(1) world functions; (2) Clojure and the aliases: (fs/glob \".\" \"**.clj\") not find, re-seq and str/ not grep or sed, "
+         "(http/get url) and (json/parse-string s true) not curl or jq, csv/read-csv not awk, (json/generate-string m {:pretty true}) with spit to write; "
+         "(3) (sys/sh \"command\") only for real external programs (git, npm, test runners, kubectl). It returns stdout+stderr as one string, "
+         "already runs in the working folder, and takes {:dir d}: never cd. Working folder: "
          (or (:cwd ctx) (System/getProperty "user.dir")) ". File and process effects are not undone by a restore.\n"
+         "execute_form evaluates any expression: write ->> pipelines that read, filter and reshape data, and return data (maps, vectors), not printed text.\n"
+         "Grow the world: when you do something twice, or the user will want it again, develop_form it as a small function with a docstring, then call it.\n"
          "Tools: develop_form {code, remove?} adds, redefines or removes definitions (defn, def, defonce). "
-         "execute_form {code} only calls existing functions; it must not def anything. "
+         "execute_form {code} evaluates any expression against the world; it must not def anything. "
          "Available tools: " (str/join ", " (sort (map :name (ext/tools)))) ".\n"
          "Every attempt runs against a checkpoint. On any error or failed invariant the world is restored to the "
          "last accepted state and you get an EDN result with :status, :message, :failed or :form. Read it, fix with "
          "develop_form, and retry. This is not Common Lisp: there are no restarts. Results are EDN.\n"
+         "clj-kondo checks every form before it runs: errors (unresolved symbols, wrong arity) come back as "
+         ":status :rejected :reason :lint with :lint findings ({:row :col :message}, rows within your code); "
+         "warnings come back as :lint on an accepted result.\n"
          "Put side effects in execute_form, not develop_form (develop forms are replayed on restore). "
-         "Do not use ns or in-ns. Aliases: str (clojure.string), set, fs (babashka.fs), sys (bba.sys).\n"
+         "Do not use ns, in-ns or require; these aliases are always loaded: "
+         (str/join ", " (map (fn [[lib _ a]] (str a " (" lib ")")) sys/world-requires)) ".\n"
          "Invariants (must hold): " (status (or (:invariants checks) (map #(assoc % :ok false) (:invariants adapter))) "") "\n"
          "Goals: " (status (:goals checks) "") "\n"
          "Functions (" (count cat) "):"
@@ -318,9 +364,9 @@
       (println "no revisions yet"))))
 
 (defn- status []
-  (let [{:keys [ns-name rev base-rev checks restore-ms timeouts]} @state
+  (let [{:keys [name ns-name rev base-rev checks restore-ms timeouts]} @state
         pass (fn [cs] (str (count (filter :ok cs)) "/" (count cs)))]
-    (println (str "world: " ns-name ", revision " (or rev 0)
+    (println (str "world: " name (when (not= 'world ns-name) (str " (ns " ns-name ")")) ", revision " (or rev 0)
                   (when (not= rev base-rev) (str " (running from base revision " base-rev ")"))
                   ", " (count (catalogue)) " functions, invariants " (pass (:invariants checks))
                   " passing, goals " (pass (:goals checks)) " met"
@@ -337,7 +383,7 @@
 
 (def ^:private tool-desc
   {"develop_form" "Add, redefine or remove definitions in the live world namespace. code: one or more Clojure forms (defn, def, defonce). remove: names to remove. All or nothing: any error or failed invariant restores the last accepted state. Returns EDN."
-   "execute_form" "Call or compose existing world functions. code: one or more forms; the printed value of the last is returned. Must not def or redefine vars. Errors restore the last accepted state. Returns EDN."})
+   "execute_form" "Evaluate any Clojure expression against the world: call world functions, or compose Clojure and the preloaded aliases over data. code: one or more forms; the printed value of the last is returned. Must not def or redefine vars. Errors restore the last accepted state. Returns EDN."})
 
 (defn- tool-result [r] {:content (pr-str r) :is-error (not (#{:accepted :preview} (:status r)))})
 
@@ -362,7 +408,7 @@
     (ext/register-command! "history" (fn [_ _] (history)))
     (ext/register-command! "status" (fn [_ _] (status)))))
 
-;; ---------------------------------------------------------------- start / stop
+;; ---------------------------------------------------------------- start / stop / switch
 
 (defn- load-from-disk!
   "Rebuild from CURRENT; on failure try lower revisions. Never changes history."
@@ -384,27 +430,128 @@
           (cond ok (when (not= n cur) (ext/warn "world running from r" n "; CURRENT is r" cur))
                 :else (recur more)))))))
 
-(defn start!
-  "Open the world in `cwd`: lock, clean temp files, rebuild from CURRENT, register tools
-  and commands, check invariants. Throws ex-info when the world cannot be opened."
-  [{:keys [cwd]}]
-  (let [dir (store/world-dir cwd)
+(defn- info [created]
+  {:created created :name (:name @state) :rev (:rev @state) :ns (:ns-name @state) :functions (count (catalogue))})
+
+(defn- open!
+  "Read the adapter and take the lock of world `name`, then (only then) release the
+  world open now and rebuild from the new one's CURRENT. Throws ex-info when the
+  world cannot be opened; the open world is untouched in that case."
+  [cwd name]
+  (let [dir (store/world-dir cwd name)
         created (store/ensure-dir! dir)
         adapter (try (store/read-adapter dir)
                      (catch Exception e (throw (ex-info (str "cannot read " dir "/world.edn: " (ex-message e)) {}))))
-        pid (store/lock! dir)]
+        pid (store/lock! dir)
+        old @state]
+    (when old
+      (when (not= (:dir old) dir) (store/unlock! (:dir old) (:pid old)))
+      (when (and (:ns-name old) (not= (:ns-name old) (:ns adapter))) (remove-ns (:ns-name old))))
     (.addShutdownHook (Runtime/getRuntime) (Thread. #(store/unlock! dir pid)))
     (doseq [t (store/delete-tmp! dir)] (ext/warn "deleted leftover temp file " t))
-    (reset! state {:dir dir :adapter adapter :ns-name (:ns adapter) :pid pid :snapshot {:log []} :timeouts 0})
+    (reset! state {:dir dir :cwd cwd :name name :adapter adapter :ns-name (:ns adapter) :pid pid
+                   :snapshot {:log []} :timeouts 0})
     (load-from-disk! dir)
     (let [w (wns) checks {:invariants (run-checks w (:invariants adapter)) :goals (run-checks w (:goals adapter))}]
       (swap! state assoc :checks checks)
       (doseq [c (:invariants checks) :when (not (:ok c))]
         (ext/warn "world invariant fails: " (:name c) (some->> (:error c) (str ": ")))))
-    (register!)
-    {:created created :rev (:rev @state) :ns (:ns adapter) :functions (count (catalogue))}))
+    (store/set-active! cwd name)
+    (info created)))
+
+(defn start!
+  "Open a world in `cwd`: move an old .bba/world/ to worlds/main, pick `world` (or the
+  last active world, or main), lock it, rebuild from CURRENT, register tools and
+  commands, check invariants. Throws ex-info when the world cannot be opened."
+  [{:keys [cwd world]}]
+  (store/migrate! cwd)
+  (let [last-used (store/active cwd)
+        name (or world (when (and last-used (store/exists? cwd last-used)) last-used) store/default-world)]
+    (when-not (store/valid-name? name)
+      (throw (ex-info (str "bad world name " (pr-str name) ": use lowercase letters, digits and single hyphens") {})))
+    (when (and world (not (store/exists? cwd world)) (seq (store/world-names cwd)))
+      (throw (ex-info (str "no world " (pr-str world) " here; worlds: " (str/join ", " (store/world-names cwd))
+                           ". Create it with /world new " world) {})))
+    (let [r (open! cwd name)]
+      (register!)
+      r)))
 
 (defn stop!
   "Release the lock (the namespace stays loaded)."
   []
   (when-let [{:keys [dir pid]} @state] (store/unlock! dir pid)))
+
+(defn current-name [] (:name @state))
+
+(defn switch!
+  "Open world `name` in place of the current one. Returns {:ok info} or {:error msg};
+  on error the current world keeps running."
+  [name]
+  (let [{:keys [cwd] cur :name} @state]
+    (cond
+      (not (store/valid-name? name)) {:error (str "bad world name " (pr-str name))}
+      (= name cur) {:error (str "already in world " name)}
+      (not (store/exists? cwd name)) {:error (str "no world " name "; create it with /world new " name)}
+      :else (try {:ok (open! cwd name)}
+                 (catch clojure.lang.ExceptionInfo e {:error (ex-message e)})))))
+
+(defn create!
+  "Create an empty world `name`, or with `from-rev`, a fork of the current world at
+  that revision (0 = empty). Does not switch. Returns {:ok dir} or {:error msg}."
+  ([name] (create! name nil))
+  ([name from-rev]
+   (let [{:keys [cwd dir rev] cur :name} @state]
+     (cond
+       (not (store/valid-name? name)) {:error (str "bad world name " (pr-str name) ": use lowercase letters, digits and single hyphens")}
+       (store/exists? cwd name) {:error (str "world " name " already exists")}
+       (nil? from-rev) (do (store/ensure-dir! (store/world-dir cwd name)) {:ok (store/world-dir cwd name)})
+       :else (try {:ok (store/fork! dir (store/world-dir cwd name) (if (= :current from-rev) (or rev 0) from-rev) cur)}
+                  (catch clojure.lang.ExceptionInfo e {:error (ex-message e)}))))))
+
+(defn switch-note
+  "What the model is told after a switch, so it stops calling the old world's functions."
+  [{:keys [name rev]}]
+  (let [names (map (comp str :name) (catalogue))]
+    (str "[bba: the world is now " (pr-str name) " (revision " rev "). Functions from the previous world are gone. "
+         (if (seq names)
+           (str "Functions here (" (count names) "): " (str/join ", " (take 60 names)) (when (> (count names) 60) ", …"))
+           "This world has no functions yet.")
+         "]")))
+
+;; ---------------------------------------------------------------- /world
+
+(def world-usage "usage: /world [NAME | new NAME | fork NAME [REV]]")
+
+(defn- list-worlds []
+  (let [{:keys [cwd] cur :name} @state]
+    (doseq [n (store/world-names cwd)
+            :let [d (store/world-dir cwd n)
+                  from (:forked-from (store/read-rev d 1))]]
+      (println (str (if (= n cur) "* " "  ") n
+                    (ui/dim (str "  revision " (or (store/current d) 0)
+                                 (when from (str ", forked from " (:world from) " r" (:rev from))))))))))
+
+(defn world-command
+  "/world: list worlds, switch (NAME), create (new NAME) or fork (fork NAME [REV]).
+  Prints the outcome. Returns the new world's info after a switch, else nil."
+  [args]
+  (let [[a b c & more] (remove str/blank? (str/split (str/trim (str args)) #"\s+"))
+        created (fn [r msg] (if (:error r) (println (ui/red (:error r))) (println (ui/green msg))) nil)]
+    (cond
+      (nil? a) (list-worlds)
+      (seq more) (println world-usage)
+      (= "new" a) (if (and b (nil? c))
+                    (created (create! b) (str "created world " b "; switch with /world " b))
+                    (println world-usage))
+      (= "fork" a) (let [rev (if c (parse-long c) :current)]
+                     (if (and b rev)
+                       (created (create! b rev) (str "forked " (current-name) " r" (if (= :current rev) (:rev @state) rev)
+                                                     " to " b "; switch with /world " b))
+                       (println world-usage)))
+      b (println world-usage)
+      :else (let [r (switch! a)]
+              (if (:error r)
+                (println (ui/red (:error r)))
+                (let [i (:ok r)]
+                  (println (ui/green (str "world: " (:name i) ", revision " (:rev i) ", " (:functions i) " functions")))
+                  i))))))

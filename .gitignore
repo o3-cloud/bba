@@ -7,3 +7,4 @@ nrepl-port
 *.iml
 .DS_Store
 .bba/
+.shared/

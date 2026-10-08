@@ -6,6 +6,7 @@
             [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [bba.core :as core]
             [bba.ext :as ext]
             [bba.main :as main]
             [bba.world :as world]
@@ -113,7 +114,7 @@
         r2 (run-bba cwd ["--world"] :input "/functions\n/execute (reverse-string \"abc\")\n")]
     (is (= 0 (:code r1)))
     (is (= 0 (:code r2)))
-    (is (str/includes? (:out r2) "world: world, revision 1, 1 functions"))
+    (is (str/includes? (:out r2) "world: main, revision 1, 1 functions"))
     (is (str/includes? (:out r2) "reverse-string"))
     (is (str/includes? (:out r2) "=> \"cba\""))
     (is (not (fs/exists? (fs/path (wdir cwd) "LOCK"))) "lock released on exit")))
@@ -241,7 +242,7 @@
         results (fn [i] (->> (nth calls i) :messages last :content (filter #(= "tool_result" (:type %))) first))]
     (is (= 0 code))
     (is (= "done" (str/trim out)) "-p output is only the answer")
-    (is (= #{"develop_form" "execute_form"} (set (map :name (:tools (first calls))))) "only the two world tools")
+    (is (= #{"develop_form" "execute_form" "activate_skill"} (set (map :name (:tools (first calls))))) "the two world tools plus the core skills tool")
     (is (str/includes? (:system (first calls)) "The world is your only tool"))
     (let [r1 (edn/read-string (:content (results 1)))]
       (is (true? (:is_error (results 1))))
@@ -285,11 +286,52 @@
 
 (deftest multi-form-develop-is-all-or-nothing
   (let [cwd (temp-cwd) _ (start cwd)
-        r (develop "(defn a [] 1) (defn b [] (undefined-thing))")]
+        r (develop "(defn a [] 1) (def b (Integer/parseInt \"x\"))")]
     (is (= :error (:status r)))
     (is (= 1 (:form-index r)))
     (is (nil? (ns-resolve 'world 'a)) "first form rolled back")
     (is (empty? (revs cwd)))))
+
+(deftest lint-rejects-errors-before-evaluation
+  (let [cwd (temp-cwd) _ (start cwd) _ (develop "(defn add [a b] (+ a b))")]
+    (testing "unresolved symbol: rejected, nothing evaluated, no revision"
+      (let [r (develop "(def side (atom :ran))\n(defn f [] (nope))")]
+        (is (= :rejected (:status r)))
+        (is (= :lint (:reason r)))
+        (is (= [{:row 2 :type :unresolved-symbol}] (map #(select-keys % [:row :type]) (:lint r))))
+        (is (nil? (ns-resolve 'world 'side)) "the first form never ran")
+        (is (= [1] (revs cwd)))))
+    (testing "arity is checked against world functions"
+      (let [r (execute "(add 1)")]
+        (is (= :lint (:reason r)))
+        (is (= :invalid-arity (-> r :lint first :type)))))
+    (testing "warnings are reported on accepted results"
+      (let [r (develop "(defn g [x] (let [y 1] x))")]
+        (is (= :accepted (:status r)))
+        (is (= [:unused-binding] (map :type (:lint r))))))
+    (testing "world aliases resolve"
+      (is (nil? (:lint (execute "(str/upper-case (fs/file-name \"a/b\"))")))))))
+
+(deftest library-aliases-survive-restores
+  (let [cwd (temp-cwd) _ (start cwd)
+        code "[(json/generate-string {:a 1}) (count (csv/read-csv \"a,b\")) (edn/read-string \"1\")
+               (some? http/get) (some? yaml/parse-string) (some? io/file) (some? walk/keywordize-keys)
+               (some? pp/pprint) (some? proc/process)]"
+        expected "[\"{\\\"a\\\":1}\" 1 1 true true true true true true]"]
+    (let [r (execute code)]
+      (is (= :accepted (:status r)))
+      (is (= expected (:value r)))
+      (is (nil? (:lint r)) "clj-kondo knows every alias"))
+    (is (= :error (:status (execute "(throw (ex-info \"boom\" {}))"))) "forces a restore")
+    (is (= expected (:value (execute code))) "aliases are back after the restore")))
+
+(deftest lint-warn-and-off
+  (doseq [mode [:warn :off]]
+    (let [cwd (temp-cwd) _ (adapter! cwd {:lint mode}) _ (start cwd)
+          r (develop "(defn f [] (nope))")]
+      (is (= :error (:status r)) (str mode ": the code is evaluated"))
+      (is (= (= mode :warn) (boolean (seq (:lint r)))) (str mode ": findings reported only for :warn"))
+      (world/stop!))))
 
 (deftest removal
   (let [cwd (temp-cwd) _ (start cwd) _ (develop (str rev-src up-src))]
@@ -408,3 +450,120 @@
     (is (= 0 (world-val 'counter)))
     (is (= [1] (revs cwd)))
     (is (str/includes? (slurp (str (fs/path (wdir cwd) "ops.jsonl"))) "\"outcome\":\"aborted\""))))
+
+;; ---------------------------------------------------------------- named worlds
+
+(defn- wcmd [args] (binding [*out* (java.io.StringWriter.)] (world/world-command args)))
+(defn- defined? [sym] (some? (ns-resolve 'world sym)))
+(defn- lock-file [cwd name] (fs/path (store/world-dir cwd name) "LOCK"))
+
+(deftest old-single-world-moves-to-main
+  (let [cwd (temp-cwd) _ (start cwd) _ (develop rev-src)
+        old (fs/path cwd ".bba" "world")]
+    (world/stop!) (remove-ns 'world)
+    (fs/move (wdir cwd) old)                      ; the layout before named worlds
+    (fs/delete-tree (store/worlds-dir cwd))
+    (let [err (start-err cwd)]
+      (is (str/includes? err "moved"))
+      (is (not (fs/exists? old)) "old folder moved, not copied")
+      (is (= "main" (world/current-name)))
+      (is (= "cba" (call 'reverse-string "abc")) "history came along")
+      (is (= [1] (revs cwd))))
+    (testing "both layouts: keep worlds/main and leave the old folder alone"
+      (world/stop!)
+      (fs/create-dirs old) (spit (str (fs/path old "world.edn")) "{}")
+      (is (str/includes? (start-err cwd) "leaving the old folder alone"))
+      (is (fs/exists? old))
+      (is (defined? 'reverse-string)))))
+
+(deftest create-switch-and-isolate
+  (let [cwd (temp-cwd) _ (start cwd) _ (develop rev-src)]
+    (is (nil? (wcmd "new jobs")) "new does not switch")
+    (is (= "main" (world/current-name)))
+    (is (= ["jobs" "main"] (store/world-names cwd)))
+    (let [i (wcmd "jobs")]
+      (is (= {:name "jobs" :rev 0 :functions 0} (select-keys i [:name :rev :functions]))))
+    (is (not (defined? 'reverse-string)) "main's functions are gone")
+    (is (= "jobs" (store/active cwd)))
+    (is (fs/exists? (lock-file cwd "jobs")))
+    (is (not (fs/exists? (lock-file cwd "main"))) "the old world's lock is released")
+    (develop "(defn only-jobs [] :jobs)")
+    (is (= [1] (store/rev-numbers (store/world-dir cwd "jobs"))))
+    (is (= [1] (revs cwd)) "main's history untouched")
+    (is (str/includes? (world/system-prompt {}) "This is world \"jobs\""))
+    (wcmd "main")
+    (is (defined? 'reverse-string))
+    (is (not (defined? 'only-jobs)))
+    (is (str/includes? (world/switch-note (#'world/info false)) "reverse-string"))
+    (testing "next start opens the last active world"
+      (wcmd "jobs") (world/stop!) (remove-ns 'world)
+      (start cwd)
+      (is (= "jobs" (world/current-name)))
+      (is (defined? 'only-jobs)))))
+
+(deftest fork-at-a-revision
+  (let [cwd (temp-cwd) _ (start cwd)]
+    (develop rev-src) (develop up-src)
+    (wcmd "fork old 1")
+    (wcmd "fork now")
+    (is (str/includes? (with-out-str (world/world-command "fork bad 99")) "unknown revision: 99"))
+    (is (not (store/exists? cwd "bad")) "a failed fork leaves nothing behind")
+    (let [r1 (store/read-rev (store/world-dir cwd "old") 1)]
+      (is (= {:world "main" :rev 1} (:forked-from r1)))
+      (is (= :fork (:type r1))))
+    (wcmd "old")
+    (is (defined? 'reverse-string))
+    (is (not (defined? 'uppercase-string)) "fork at r1 has only r1's functions")
+    (is (= 2 (:revision (develop "(defn x [] 1)"))) "the fork continues its own numbering")
+    (wcmd "now")
+    (is (every? defined? '[reverse-string uppercase-string]) "default forks the current revision")
+    (is (str/includes? (with-out-str (world/world-command "")) "forked from main r1"))))
+
+(deftest failed-switch-keeps-the-current-world
+  (let [cwd (temp-cwd) _ (start cwd) _ (develop rev-src)]
+    (wcmd "new busy") (wcmd "new broken")
+    (spit (str (fs/path (store/world-dir cwd "broken") "world.edn")) "{:ns clojure.core}")
+    (let [proc (p/process ["sleep" "30"])]
+      (try
+        (spit (str (lock-file cwd "busy")) (str (.pid (:proc proc))))
+        (doseq [[target msg] [["busy" "world in use by pid"] ["broken" "is not allowed"]
+                              ["nope" "no world nope"] ["main" "already in world main"]]]
+          (let [out (with-out-str (world/world-command target))]
+            (is (str/includes? out msg) target)
+            (is (= "main" (world/current-name)))
+            (is (= "cba" (call 'reverse-string "abc")))
+            (is (fs/exists? (lock-file cwd "main")) "main still locked by us")))
+        (finally (p/destroy proc) @proc)))))
+
+(deftest world-names
+  (doseq [ok ["main" "jobs" "a1" "x-2-y"]] (is (store/valid-name? ok) ok))
+  (doseq [bad ["" "Jobs" "a--b" "-a" "a-" "../x" "a/b" "new" "fork" (apply str (repeat 65 "a"))]]
+    (is (not (store/valid-name? bad)) bad))
+  (let [cwd (temp-cwd) _ (start cwd)]
+    (is (str/includes? (with-out-str (world/world-command "new Bad")) "bad world name"))
+    (is (str/includes? (with-out-str (world/world-command "new a b c")) "usage"))
+    (is (= ["main"] (store/world-names cwd)))))
+
+(deftest cli-world-flag-and-continue
+  (is (= {:world "jobs"} (main/parse-args ["--world" "jobs"])))
+  (is (:warn (main/parse-args ["--world"])) "the old bare flag warns")
+  (let [cwd (temp-cwd)
+        fresh! #(do (remove-ns 'world) (ext/reset-all!) (reset! world/state nil))
+        fp (fake-provider [[{:type "text" :text "ok"}]])
+        r1 (run-bba cwd [] :provider fp :input "/world new jobs\n/world jobs\nhello\n/quit\n")
+        sent (->> @(:calls fp) first :messages last :content first :text)]
+    (is (= 0 (:code r1)))
+    (is (str/starts-with? sent "[bba: the world is now \"jobs\""))
+    (is (str/ends-with? sent "hello"))
+    (is (= "jobs" (core/session-world (core/latest-session cwd))))
+    (fresh!)
+    (store/set-active! cwd "main")
+    (let [r2 (run-bba cwd ["-c"] :input "/status\n")]
+      (is (str/includes? (:out r2) "world: jobs") "-c resumes in the session's world, not ACTIVE"))
+    (fresh!)
+    (let [r3 (run-bba cwd ["-c" "--world" "main"] :input "/status\n")]
+      (is (str/includes? (:out r3) "world: main") "--world wins over the session"))
+    (fresh!)
+    (let [r4 (run-bba cwd ["--world" "nope"])]
+      (is (= 1 (:code r4)))
+      (is (str/includes? (:err r4) "no world \"nope\"")))))

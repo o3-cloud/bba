@@ -2,11 +2,12 @@
   "System prompt, agent loop, tool dispatch, extension loader, sessions."
   (:require [babashka.fs :as fs]
             [cheshire.core :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [bba.ext :as ext]
             [bba.provider :as provider]))
 
-(def default-max-turns 50)
+(def default-max-turns 200)
 
 ;; ---------------------------------------------------------------- prompt
 
@@ -79,11 +80,23 @@
        (map #(select-keys (json/parse-string % true) [:role :content]))
        replayable))
 
-(defn log-message! [{:keys [session-file]} msg]
+(defn log-message!
+  "Append `msg` to the session file, tagged with the time and the world (ctx :world) it ran in."
+  [{:keys [session-file world]} msg]
   (when session-file
     (spit session-file
-          (str (json/generate-string (assoc (select-keys msg [:role :content]) :ts (System/currentTimeMillis))) "\n")
+          (str (json/generate-string (cond-> (assoc (select-keys msg [:role :content]) :ts (System/currentTimeMillis))
+                                       world (assoc :world world)))
+               "\n")
           :append true)))
+
+(defn session-world
+  "The world the last message of a session ran in, or nil (older sessions have none)."
+  [file]
+  (some->> (str/split-lines (slurp file))
+           (remove str/blank?)
+           reverse
+           (some #(try (:world (json/parse-string % true)) (catch Exception _ nil)))))
 
 ;; ---------------------------------------------------------------- tools
 
@@ -120,6 +133,30 @@
     (cond-> {:type "tool_result" :tool_use_id id :content (str (:content result))}
       (:is-error result) (assoc :is_error true))))
 
+;; ---------------------------------------------------------------- hooks
+
+(defn- request-reason
+  "Run :request hooks over the outgoing request. Each may return {:request req'}
+  to replace it. A hook that throws or returns something that is not a map with a
+  :messages vector is ignored (fail-open: the previous request is kept)."
+  [req ctx]
+  (reduce (fn [r {:keys [handler source]}]
+            (try (let [out (handler {:request r} ctx)]
+                   (if (and (map? out) (map? (:request out)) (vector? (get-in out [:request :messages])))
+                     (:request out)
+                     (do (when (some? out) (ext/warn "request hook in " source " returned something that is not {:request req}; ignored"))
+                         r)))
+                 (catch Exception e
+                   (ext/warn "request hook in " source " failed: " (ex-message e))
+                   r)))
+          req (ext/hooks :request)))
+
+(defn apply-request-hooks
+  "Let extensions transform the request that goes to the provider. Called once per
+  turn, so a hook sees the live ctx (for example a provider switch)."
+  [req ctx]
+  (if-let [hs (seq (ext/hooks :request))] (request-reason req ctx) req))
+
 ;; ---------------------------------------------------------------- loop
 
 (defn- show [ctx s] (when-let [p (or (:show ctx) (:print ctx))] (p s)))
@@ -137,8 +174,9 @@
         {:status :max-turns :messages messages
          :text (str "stopped: reached max turns (" max-turns ")")}
         (let [_ (when-let [f (:on-request ctx)] (f))
-              reply (call (cond-> {:messages messages :system (prompt-for ctx) :tools (tool-specs)}
-                             (:on-text ctx) (assoc :on-text (:on-text ctx))))
+              base (cond-> {:messages messages :system (prompt-for ctx) :tools (tool-specs)}
+                           (:on-text ctx) (assoc :on-text (:on-text ctx)))
+              reply (call (apply-request-hooks base ctx))
               amsg {:role "assistant" :content (:content reply)}
               uses (filter #(= "tool_use" (:type %)) (:content reply))
               messages (conj messages amsg)]
@@ -162,6 +200,10 @@
 
 ;; ---------------------------------------------------------------- extensions
 
+(def core-extension-dir
+  "extensions/ next to src/: core extensions that ship with bba and always load."
+  (str (fs/path (-> (io/resource "bba/core.clj") io/file fs/parent fs/parent fs/parent) "extensions")))
+
 (defn extension-dirs [{:keys [cwd home]}]
   [(str (fs/path home "extensions")) (str (fs/path cwd ".bba" "extensions"))])
 
@@ -174,10 +216,11 @@
          false)))
 
 (defn load-extensions!
-  "Remove extension registrations, then load every *.clj in the user and project folders."
-  [ctx]
+  "Remove extension registrations, then load every *.clj in the core folder and,
+  unless `core-only?`, the user and project folders."
+  [ctx & [core-only?]]
   (ext/reset-extensions!)
-  (doseq [dir (extension-dirs ctx)
+  (doseq [dir (cons core-extension-dir (when-not core-only? (extension-dirs ctx)))
           :when (fs/directory? dir)
           f (sort (map str (fs/glob dir "*.clj")))]
     (load-extension! f)))
