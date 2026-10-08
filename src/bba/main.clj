@@ -7,9 +7,10 @@
             [bba.provider :as provider]
             [bba.tui :as tui]
             [bba.ui :as ui]
-            [bba.world :as world]))
+            [bba.world :as world]
+            [bba.world-store :as store]))
 
-(def usage (str "usage: bba [-p PROMPT] [-c] [--provider anthropic|openai|openrouter|ollama] [--model NAME]"
+(def usage (str "usage: bba [-p PROMPT] [-c] [--world NAME] [--provider anthropic|openai|openrouter|ollama] [--model NAME]"
                 " [--max-turns N] [--no-extensions]"))
 
 (defn parse-args [args]
@@ -27,7 +28,10 @@
                                  (assoc opts :error (str a " needs a value")))
       ("-c" "--continue") (recur more (assoc opts :continue true))
       "--no-extensions" (recur more (assoc opts :no-extensions true))
-      "--world" (recur more opts)  ; the world is the only mode; the old flag is accepted and ignored
+      "--world" (if (and (some? (first more)) (not (str/starts-with? (first more) "-")))
+                  (recur (rest more) (assoc opts :world (first more)))
+                  ;; before named worlds --world was a mode flag with no value: accept it, ignore it
+                  (recur more (assoc opts :warn "--world needs a name (the old flag is ignored)")))
       ("-h" "--help") (assoc opts :help true)
       (assoc opts :error (str "unknown argument: " a)))))
 
@@ -99,7 +103,7 @@
 ;; ---------------------------------------------------------------- commands
 
 (defn- help-text []
-  (str "commands: /new /reload /provider [NAME [MODEL]] /model [NAME] /clear /help /quit /exit"
+  (str "commands: /new /world [NAME] /reload /provider [NAME [MODEL]] /model [NAME] /clear /help /quit /exit"
        (str/join (map #(str " /" (:name %)) (sort-by :name (ext/commands))))))
 
 (defn- show-model [env]
@@ -135,11 +139,17 @@
   "Each fn takes [ctx args] and returns the ctx to use next."
   []
   {"reload" (fn [ctx _] (core/load-extensions! ctx)
+              ;; extensions were dropped and reloaded: let them re-initialize
+              (ext/emit :session-start {} ctx)
               (println (str "reloaded: " (count (ext/tools)) " tools, "
                             (count (ext/commands)) " commands"))
               ctx)
    "provider" (fn [ctx args] (switch-provider ctx args))
    "model" switch-model
+   "world" (fn [ctx args]  ; a switch tells the model with the next message
+             (if-let [i (world/world-command args)]
+               (assoc ctx :world (:name i) :note (world/switch-note i))
+               ctx))
    "help" (fn [ctx _] (println (help-text)) ctx)
    "clear" (fn [ctx _] (ui/clear-screen) ctx)})
 
@@ -190,13 +200,14 @@
            (str/starts-with? (str/triml line) "/") (recur (run-command ctx (str/trim line)) messages)
            :else
            (let [live (atom true)
-                 r (try (with-cancel #(agent-run (assoc ctx :live live) messages line) live)
+                 text (if-let [note (:note ctx)] (str note "\n\n" line) line)
+                 r (try (with-cancel #(agent-run (assoc ctx :live live) messages text) live)
                         (catch Exception e
                           (ext/warn (ui/red (or (ex-message e) "error")))
                           nil))]
              (cond
                (= ::cancelled r) (do (ui/stop!) (println) (println (ui/yellow "(cancelled)")) (recur ctx messages))
-               r (recur ctx (second r))
+               r (recur (dissoc ctx :note) (second r))
                :else (recur ctx messages)))))))))
 
 ;; ---------------------------------------------------------------- entry
@@ -204,18 +215,19 @@
 (defn- run-session
   "Register tools, load extensions, check the provider, then run -p or the interactive loop."
   [{:keys [cwd env] :as ctx} {:keys [prompt no-extensions] :as opts} in world]
-  (if no-extensions (ext/reset-extensions!) (core/load-extensions! ctx))
+  (core/load-extensions! ctx no-extensions)
   (let [problem (when-not (ext/provider) (provider/check-env env))]
     (if (and problem prompt)
       (do (binding [*out* *err*] (println problem)) 1)
       (let [old (when (:continue opts)
-                  (or (core/latest-session cwd)
+                  (or (:session opts)
                       (do (ext/warn "no session to continue here; starting a new one") nil)))
-            ctx (assoc ctx :session-file (or old (core/new-session-file cwd)))
+            ctx (assoc ctx :session-file (or old (core/new-session-file cwd)) :world (:name world))
             messages (if old (core/load-session old) [])]
         (when problem (ext/warn problem "; manual /commands only"))
         (when-not prompt
-          (println (ui/dim (str (when (:created world) "created .bba/world/world.edn; ") "world: " (:ns world)
+          (println (ui/dim (str (when (:created world) (str "created " (store/world-dir cwd (:name world)) "/world.edn; "))
+                                "world: " (:name world) (when (not= 'world (:ns world)) (str " (ns " (:ns world) ")"))
                                 ", revision " (:rev world) ", " (:functions world) " functions"))))
         (ext/emit :session-start {} ctx)
         (if prompt
@@ -227,7 +239,7 @@
 (defn run
   "Run bba. Returns the exit code. `opts` = {:args :cwd :env :in :tty?}; *out*/*err* are used for output."
   [{:keys [args cwd env in tty?]}]
-  (let [{:keys [prompt max-turns error help] :as opts} (parse-args args)
+  (let [{:keys [prompt max-turns error help warn] :as opts} (parse-args args)
         env (cond-> env (:provider opts) (assoc "BBA_PROVIDER" (:provider opts))
                         (:model opts) (assoc "BBA_MODEL" (:model opts)))
         home (or (get env "BBA_HOME") (str (fs/path (System/getProperty "user.home") ".bba")))]
@@ -237,12 +249,19 @@
       error (do (ext/warn error "\n" usage) 1)
       (and (some? prompt) (str/blank? prompt)) (do (ext/warn "empty prompt\n" usage) 1)
       :else
-      (let [ctx {:cwd cwd :home home :env env
+      (let [_ (when warn (ext/warn warn))
+            old (when (:continue opts) (core/latest-session cwd))
+            opts (assoc opts :session old)
+            ;; -c resumes in the session's world unless --world names one
+            from-session (when-let [w (some-> old core/session-world)]
+                           (if (store/exists? cwd w) w
+                               (do (ext/warn "the session's world " w " is gone; using the last active world") nil)))
+            ctx {:cwd cwd :home home :env env
                  :max-turns (or max-turns (some-> (get env "BBA_MAX_TURNS") parse-long))
                  :print (when-not prompt println)
                  :tty? (boolean tty?)
                  :stream? (boolean (and tty? (not prompt)))}
-            world (try {:info (world/start! ctx)}  ; the world is the only mode
+            world (try {:info (world/start! (assoc ctx :world (or (:world opts) from-session)))}
                        (catch clojure.lang.ExceptionInfo e {:error (ex-message e)}))]
         (if (:error world)
           (do (ext/warn (:error world)) 1)

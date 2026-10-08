@@ -30,6 +30,7 @@
 
 (defn tool-use [id name input] {:type "tool_use" :id id :name name :input input})
 
+
 (defn text [s] {:type "text" :text s})
 
 (defn tool-names [req] (set (map :name (:tools req))))
@@ -47,7 +48,7 @@
 (defn copy-ext [cwd name]
   (let [dir (fs/path cwd ".bba" "extensions")]
     (fs/create-dirs dir)
-    (fs/copy (fs/path root "extensions" name) (fs/path dir name) {:replace-existing true})))
+    (fs/copy (fs/path root "examples" "extensions" name) (fs/path dir name) {:replace-existing true})))
 
 (defn run-bba
   "Run main/run in-process with a fake provider installed by a project extension-free
@@ -79,7 +80,7 @@
     (is (= 0 code))
     (is (= "done" (str/trim out)))
     (is (= 2 (count calls)))
-    (is (= #{"develop_form" "execute_form"} (tool-names (first calls))) "the world tools are the only tools")
+    (is (= #{"develop_form" "execute_form" "activate_skill"} (tool-names (first calls))) "the world tools plus the core skills tool")
     (let [[r] (tool-results (second calls))]
       (is (= "t1" (:tool_use_id r)))
       (is (str/includes? (:content r) "hi"))
@@ -95,7 +96,7 @@
     (is (contains? (tool-names c1) "reverse"))
     (is (= "cba" (:content (first (tool-results c2)))))))
 
-(def reverse-src (slurp (str (fs/path root "extensions" "reverse.clj"))))
+(def reverse-src (slurp (str (fs/path root "examples" "extensions" "reverse.clj"))))
 
 (def hello-cmd-src
   "(ns bba.extensions.hello (:require [bba.ext :as ext]))
@@ -246,6 +247,45 @@
     (is (nil? (ext/tool "reverse")))
     (is (ext/tool "execute_form") "built-ins survive reload")))
 
+(deftest unload-hooks-run-on-reload-and-drop-broken-files
+  ;; Core extensions such as mcp.clj register unloaders of their own, so these
+  ;; tests scope their assertions to the file under test by :source.
+  (let [{:keys [cwd home]} (temp-dirs)
+        ctx {:cwd cwd :home home}
+        f (str (fs/path cwd ".bba" "extensions" "u.clj"))
+        mine (fn [] (filter #(= f (:source %)) (:unloaders @ext/registry)))]
+    (binding [ext/*source* :builtin] (ext/register-tool! {:name "execute_form" :handler (fn [_ _] "ok")}))
+    (fs/create-dirs (fs/parent f))
+    (spit f (str "(ns bba.extensions.u (:require [bba.ext :as ext]))"
+                "(ext/on-unload! (fn [] (println \"UNLOAD-A\")))"))
+    (core/load-extensions! ctx)
+    (is (= 1 (count (mine))) "one unloader registered for this file")
+    ;; a reload runs the unload hook, then drops it with the extension
+    (let [out (java.io.StringWriter.)]
+      (binding [*out* out] (core/load-extensions! ctx))
+      (is (str/includes? (str out) "UNLOAD-A") "unload hook ran on reload"))
+    (is (= 1 (count (mine))) "the fresh load registered its own")
+    ;; a file that fails to load cannot leave an unloader behind
+    (spit f "(ns broken")
+    (binding [*err* (java.io.StringWriter.)] (core/load-extensions! ctx))
+    (is (empty? (mine)) "no unloader survives a broken file")
+    (is (ext/tool "execute_form") "built-ins survive")))
+
+(deftest unload-hook-error-is-ignored
+  (let [{:keys [cwd home]} (temp-dirs)
+        ctx {:cwd cwd :home home}
+        f (str (fs/path cwd ".bba" "extensions" "v.clj"))
+        mine (fn [] (filter #(= f (:source %)) (:unloaders @ext/registry)))]
+    (fs/create-dirs (fs/parent f))
+    (spit f (str "(ns bba.extensions.v (:require [bba.ext :as ext]))"
+                "(ext/on-unload! (fn [] (throw (ex-info \"boom\" {}))))"))
+    (core/load-extensions! ctx)
+    (let [err (java.io.StringWriter.)]
+      (binding [*err* err] (core/load-extensions! ctx))
+      (is (str/includes? (str err) "unload hook") "the failure was reported"))
+    ;; reloading the file drops the old unloader and registers a fresh one
+    (is (= 1 (count (mine))) "the failed unloader was dropped and replaced")))
+
 (deftest hook-error-fails-closed-and-override-warns
   (let [ran (atom false)]
     (binding [ext/*source* :builtin] (ext/register-tool! {:name "execute_form" :handler (fn [_ _] (reset! ran true) "ran")}))
@@ -374,3 +414,30 @@
         (is (< (- (System/currentTimeMillis) t0) 10000))
         (is (str/includes? r "early"))
         (is (str/includes? r "timed out"))))))
+
+
+;; ---------------------------------------------------------------- request hooks
+
+(deftest request-hook-transforms-what-is-sent
+  (ext/on! :request (fn [{:keys [request]} _] {:request (assoc request :marker :hooked)}))
+  (let [fp (fake-provider [[(text "done")]])
+        ctx {:cwd "/tmp" :home "/tmp" :env {}}]
+    (ext/set-provider! (:fn fp))
+    (core/run-turns ctx [(core/user-message "hi")])
+    (is (= :hooked (:marker (first @(:calls fp)))) "the hook sees and can change the request")))
+
+(deftest request-hook-failure-is-fail-open
+  (ext/on! :request (fn [_ _] (throw (ex-info "boom" {}))))
+  (let [fp (fake-provider [[(text "done")]])
+        ctx {:cwd "/tmp" :home "/tmp" :env {}}]
+    (ext/set-provider! (:fn fp))
+    (core/run-turns ctx [(core/user-message "hi")])
+    (is (= 1 (count @(:calls fp))) "the turn still reaches the provider")))
+
+(deftest request-hook-bad-return-is-ignored
+  (ext/on! :request (fn [_ _] :not-a-request))
+  (let [fp (fake-provider [[(text "done")]])
+        ctx {:cwd "/tmp" :home "/tmp" :env {}}]
+    (ext/set-provider! (:fn fp))
+    (core/run-turns ctx [(core/user-message "hi")])
+    (is (= 1 (count (:messages (first @(:calls fp))))) "the original request is kept")))

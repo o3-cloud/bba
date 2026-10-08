@@ -8,7 +8,7 @@
   "The file being loaded, or :builtin for core registrations."
   :builtin)
 
-(defonce registry (atom {:tools {} :commands {} :hooks {} :provider nil}))
+(defonce registry (atom {:tools {} :commands {} :hooks {} :provider nil :unloaders []}))
 
 (defn warn
   "Print a `bba:` warning on stderr."
@@ -35,10 +35,19 @@
   (put! :commands "command" name {:name name :handler handler}))
 
 (defn on!
-  "Add an event hook. Events: :session-start, :tool-call.
-  A :tool-call hook gets {:name :input} and may return {:block true :reason s}."
+  "Add an event hook. Events: :session-start, :tool-call, :request.
+  A :tool-call hook gets {:name :input} and may return {:block true :reason s}.
+  A :request hook gets {:request req} with the live ctx and may return
+  {:request req'} to transform what is sent to the provider (compaction, redaction)."
   [event handler]
   (swap! registry update-in [:hooks event] (fnil conj []) {:handler handler :source *source*}))
+
+(defn on-unload!
+  "Register a cleanup fn to run when extension registrations are dropped
+  (on /reload and with --no-extensions). Unloaders run newest first; an error
+  warns and is ignored."
+  [f]
+  (swap! registry update :unloaders conj {:handler f :source *source*}))
 
 (defn set-provider!
   "Replace the provider: (fn [{:keys [messages system tools]}]) -> assistant message."
@@ -61,15 +70,28 @@
 
 (defn- builtin? [v] (= :builtin (:source v)))
 
-(defn reset-extensions!
-  "Remove every registration that did not come from core."
+(defn- run-unloaders!
+  "Run the cleanup fns of the extensions being dropped, newest first."
   []
+  (let [{:keys [unloaders]} @registry
+        going (remove (comp builtin? :source) unloaders)]
+    (doseq [{:keys [handler source]} (reverse going)]
+      (try (handler)
+           (catch Throwable e
+             (warn "unload hook in " source " failed: " (ex-message e)))))))
+
+(defn reset-extensions!
+  "Remove every registration that did not come from core, after running the
+  unload hooks of the extensions being dropped."
+  []
+  (run-unloaders!)
   (swap! registry
          (fn [r]
            (-> r
                (update :tools #(into {} (filter (comp builtin? val)) %))
                (update :commands #(into {} (filter (comp builtin? val)) %))
                (update :hooks #(update-vals % (fn [hs] (filterv builtin? hs))))
+               (update :unloaders #(filterv builtin? %))
                (update :provider #(when (builtin? %) %))))))
 
 (defn reset-all!
