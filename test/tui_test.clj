@@ -142,14 +142,14 @@
 
 (def answer {:role "assistant" :content [{:type "text" :text "a"}]})
 
-(def use {:role "assistant" :content [{:type "tool_use" :id "t" :name "bash" :input {}}]})
+(def tool-call {:role "assistant" :content [{:type "tool_use" :id "t" :name "bash" :input {}}]})
 
 (def result {:role "user" :content [{:type "tool_result" :tool_use_id "t" :content "ok"}]})
 
 (deftest replayable-drops-incomplete-turns
-  (is (= [u use result answer] (core/replayable [u use result answer])))
-  (is (= [u answer] (core/replayable [u answer u use])) "a cancelled last turn is dropped")
-  (is (= [u answer] (core/replayable [u use u answer])) "a cancelled turn in the middle is dropped")
+  (is (= [u tool-call result answer] (core/replayable [u tool-call result answer])))
+  (is (= [u answer] (core/replayable [u answer u tool-call])) "a cancelled last turn is dropped")
+  (is (= [u answer] (core/replayable [u tool-call u answer])) "a cancelled turn in the middle is dropped")
   (is (= [] (core/replayable [result answer])) "messages without a user turn are skipped"))
 
 (deftest continue-flag-resumes-the-latest-session

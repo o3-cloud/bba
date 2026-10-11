@@ -55,8 +55,9 @@
 ;; ---------------------------------------------------------------- selection
 
 (deftest check-env-per-provider
-  (is (= "ANTHROPIC_API_KEY is not set" (provider/check-env {})))
-  (is (nil? (provider/check-env {"ANTHROPIC_API_KEY" "k"})))
+  (is (nil? (provider/check-env {})) "the default provider is ollama, which needs no key")
+  (is (= "ANTHROPIC_API_KEY is not set" (provider/check-env {"BBA_PROVIDER" "anthropic"})))
+  (is (nil? (provider/check-env {"BBA_PROVIDER" "anthropic" "ANTHROPIC_API_KEY" "k"})))
   (is (= "OPENAI_API_KEY is not set" (provider/check-env {"BBA_PROVIDER" "openai"})))
   (is (nil? (provider/check-env {"BBA_PROVIDER" "OpenAI" "OPENAI_API_KEY" "k"})) "case does not matter")
   (is (nil? (provider/check-env {"BBA_PROVIDER" "ollama"})) "Ollama needs no key")
@@ -156,14 +157,22 @@
         {:code code :out (str out) :err (str err)})
       (finally (fs/delete-tree dir)))))
 
+(deftest default-provider-is-ollama-deepseek
+  (let [{:keys [code out]} (session {}
+                                    ["/provider" "/quit"])]
+    (is (= 0 code))
+    (is (str/includes? out "provider: ollama, model: deepseek-v4.1-flash:cloud")
+        "with no BBA_PROVIDER the banner and /provider show the new default")
+    (is (nil? (provider/check-env {})) "and it runs with no key at all")))
+
 (deftest switch-commands-show-and-validate
-  (let [{:keys [code out err]} (session {"ANTHROPIC_API_KEY" "k"}
+  (let [{:keys [code out err]} (session {"BBA_PROVIDER" "anthropic" "ANTHROPIC_API_KEY" "k"}
                                         ["/provider" "/model" "/provider ollama" "/model qwen3.5:0.8b"
                                          "/provider nope" "/provider openai" "/model" "/quit"])]
     (is (= 0 code))
     (is (str/includes? out "provider: anthropic, model: claude-opus-5-5") "banner and /provider show the start state")
-    (is (str/includes? out "providers: anthropic, ollama, openai, openrouter"))
-    (is (str/includes? out "provider: ollama, model: gpt-oss") "switch uses the new default model")
+    (is (str/includes? out "providers: anthropic, codex, ollama, openai, openrouter"))
+    (is (str/includes? out "provider: ollama, model: deepseek-v4.1-flash:cloud") "switch uses the new default model")
     (is (str/includes? out "provider: ollama, model: qwen3.5:0.8b"))
     (is (str/includes? err "unknown provider: nope"))
     (is (str/includes? err "OPENAI_API_KEY is not set; still using ollama"))
