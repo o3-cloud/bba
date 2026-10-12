@@ -189,26 +189,39 @@
                 (when (ext/provider) " (an extension replaced the provider; it ignores this)"))))
 
 (defn- switch-provider
-  "No NAME: show the current provider and the list. NAME [MODEL]: switch, and set
-  MODEL when given. The model is not checked until the next request."
+  "No NAME: select a provider in a terminal, else list providers. NAME [MODEL]: switch."
   [ctx args]
   (let [[name model] (str/split (str/trim (str args)) #"\s+")
         model (not-empty model)]
     (if (str/blank? name)
-      (do (show-model (:env ctx))
-          (println (str "providers: " (str/join ", " (sort (keys provider/providers)))))
+      (if (:tty? ctx)
+        (if-let [selected (tui/pick! "Providers" (sort (keys provider/providers))
+                                     (provider/provider-name (:env ctx)))]
+          (switch-provider ctx selected)
           ctx)
+        (do (show-model (:env ctx))
+            (println (str "providers: " (str/join ", " (sort (keys provider/providers)))))
+            ctx))
       (let [env (cond-> (assoc (:env ctx) "BBA_PROVIDER" (str/lower-case name))
+                  (not= (str/lower-case name) (provider/provider-name (:env ctx))) (dissoc "BBA_MODEL")
                   model (assoc "BBA_MODEL" model))]
         (if-let [problem (provider/check-env env)]
           (do (ext/warn problem "; still using " (provider/provider-name (:env ctx))) ctx)
           (do (show-model env) (assoc ctx :env env)))))))
 
 (defn- switch-model
-  "No NAME: show the current model. NAME: use it for the next messages (not checked until then)."
+  "No NAME: select a model in a terminal, else list models. NAME: use it next."
   [ctx name]
   (if (str/blank? name)
-    (do (show-model (:env ctx)) ctx)
+    (let [models (provider/model-catalog (:env ctx))]
+      (if (:tty? ctx)
+        (if-let [selected (tui/pick! (str "Models for " (provider/provider-name (:env ctx)))
+                                     models (provider/model-name (:env ctx)))]
+          (switch-model ctx selected)
+          ctx)
+        (do (show-model (:env ctx))
+            (println (str "models: " (str/join ", " models)))
+            ctx)))
     (let [env (assoc (:env ctx) "BBA_MODEL" name)]
       (show-model env)
       (assoc ctx :env env))))

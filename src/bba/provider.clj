@@ -145,6 +145,48 @@
 
 (defn model-name "The model the selected provider will use." [env] (model env (provider-name env)))
 
+(defn catalog-models
+  "Pure: extract model names from a decoded Codex cache or Ollama tags response."
+  [kind data]
+  (let [entries (when (map? data) (:models data))]
+    (->> (when (sequential? entries) entries)
+         (filter map?)
+         (keep (fn [entry]
+                 (case kind
+                   :codex (when (or (nil? (:visibility entry)) (= "list" (:visibility entry)))
+                            (:slug entry))
+                   :ollama (or (:name entry) (:model entry))
+                   nil)))
+         (filter #(and (string? %) (not (str/blank? %))))
+         distinct sort vec)))
+
+(defn- ollama-models [env]
+  ;; The timed wait also bounds a server that sends headers but stalls the body.
+  (let [request (http/get (str (base-url env "ollama") "/api/tags")
+                          {:async true :timeout 1500 :throw false})]
+    (try
+      (let [response (.get request 1500 java.util.concurrent.TimeUnit/MILLISECONDS)]
+        (when (= 200 (:status response))
+          (catalog-models :ollama (json/parse-string (:body response) true))))
+      (finally (.cancel request true)))))
+
+(defn model-catalog
+  "Discover models with a bounded request. Keep the current model on all paths."
+  [env]
+  (let [n (provider-name env)
+        found (try
+                (case n
+                  "codex" (let [home (or (not-empty (get env "CODEX_HOME"))
+                                         (str (System/getProperty "user.home") "/.codex"))]
+                            (catalog-models :codex
+                                            (json/parse-string (slurp (io/file home "models_cache.json")) true)))
+                  "ollama" (ollama-models env)
+                  nil)
+                (catch Exception _ nil))]
+    (->> (concat [(model-name env)] (or (seq found) [(:model (providers n))]))
+         (filter #(and (string? %) (not (str/blank? %))))
+         distinct vec)))
+
 (defn anthropic
   "Return a provider fn for the Anthropic API, configured from `env`."
   [env]

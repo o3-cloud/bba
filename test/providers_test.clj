@@ -8,6 +8,7 @@
             [bba.ext :as ext]
             [bba.main :as main]
             [bba.openai :as openai]
+            [bba.tui :as tui]
             [bba.provider :as provider]))
 
 ;; ---------------------------------------------------------------- translation
@@ -209,3 +210,90 @@
     (is (= 2 (count (distinct (re-seq #"sessions/\S+\.jsonl" out)))) "banner and /new print different session files")
     (testing "the conversation is empty after /new"
       (is (= ["again"] (map :content (rest (:messages (:body (second reqs))))))))))
+
+;; ---------------------------------------------------------------- model catalogs and pickers
+
+(deftest parse-model-catalogs
+  (is (= ["alpha" "beta"]
+         (provider/catalog-models :codex
+                                  {:fetched_at "date" :models [{:slug "beta" :display_name "Label" :visibility "list"
+                                                                :supported_in_api false}
+                                                               {:slug "alpha"} {:slug "beta"}
+                                                               {:slug "hidden" :visibility "hide"}
+                                                               {:slug ""} {:slug 1} nil]})))
+  (is (= ["a:latest" "b:q4"]
+         (provider/catalog-models :ollama {:models [{:name "b:q4"} {:model "a:latest"} {:name "b:q4"} {}]})))
+  (doseq [data [nil [] {:models {}} {:models "bad"} {:models [1 "x" nil {}]}]]
+    (is (= [] (provider/catalog-models :codex data)))
+    (is (= [] (provider/catalog-models :ollama data)))))
+
+(deftest codex-cache-and-fallback
+  (let [dir (fs/create-temp-dir {:prefix "bba-catalog"})
+        file (str (fs/path dir "models_cache.json"))
+        env {"BBA_PROVIDER" "codex" "CODEX_HOME" (str dir) "BBA_MODEL" "custom"}
+        fallback ["custom" (:model (provider/providers "codex"))]]
+    (try
+      (is (= fallback (provider/model-catalog env)) "missing cache")
+      (spit file (json/generate-string {:models [{:slug "from-cache" :visibility "list"}]}))
+      (is (= ["custom" "from-cache"] (provider/model-catalog env)))
+      (doseq [body ["{bad" "null" "{}" "{\"models\":[]}"]]
+        (spit file body)
+        (is (= fallback (provider/model-catalog env))))
+      (finally (fs/delete-tree dir))))
+  (doseq [name ["openai" "anthropic" "openrouter"]]
+    (let [default (:model (provider/providers name))]
+      (is (= [default] (provider/model-catalog {"BBA_PROVIDER" name})))
+      (is (= ["custom" default] (provider/model-catalog {"BBA_PROVIDER" name "BBA_MODEL" "custom"}))))))
+
+(deftest ollama-catalog-http-and-failures
+  (doseq [[status body expected] [[200 "{\"models\":[{\"name\":\"local:q4\"}]}" ["custom" "local:q4"]]
+                                  [200 "bad" ["custom" provider/default-model]]
+                                  [500 "{}" ["custom" provider/default-model]]]]
+    (let [seen (atom nil)
+          srv (server/run-server (fn [req] (reset! seen (:uri req)) {:status status :body body})
+                                 {:port 0 :legacy-return-value? false})]
+      (try
+        (is (= expected (provider/model-catalog {"OLLAMA_HOST" (str "127.0.0.1:" (server/server-port srv) "/")
+                                                 "BBA_MODEL" "custom"})))
+        (is (= "/api/tags" @seen))
+        (finally (server/server-stop! srv)))))
+  (is (= [provider/default-model] (provider/model-catalog {"OLLAMA_HOST" "http://127.0.0.1:1"}))))
+
+(deftest ollama-catalog-timeout
+  (let [srv (server/run-server #(server/as-channel % {:on-open (fn [_])})
+                               {:port 0 :legacy-return-value? false})
+        start (System/nanoTime)]
+    (try
+      (is (= [provider/default-model]
+             (provider/model-catalog {"OLLAMA_HOST" (str "http://127.0.0.1:" (server/server-port srv))})))
+      (is (< (/ (- (System/nanoTime) start) 1e6) 4000) "a stalled server cannot block the prompt")
+      (finally (server/server-stop! srv)))))
+
+(deftest interactive-picker-commands
+  (let [ctx {:tty? true :env {"BBA_PROVIDER" "ollama" "BBA_MODEL" "old" "OPENAI_API_KEY" "k"}}
+        seen (atom [])
+        choose (fn [value] (fn [& args] (swap! seen conj args) value))]
+    (with-redefs [tui/pick! (choose "openai")]
+      (let [result (#'main/switch-provider ctx "")]
+        (is (= "openai" (provider/provider-name (:env result))))
+        (is (= "gpt-5" (provider/model-name (:env result))))
+        (is (= ["Providers" (sort (keys provider/providers)) "ollama"] (first @seen)))))
+    (with-redefs [tui/pick! (choose "anthropic")]
+      (is (= ctx (#'main/switch-provider ctx nil)) "credential validation still applies"))
+    (with-redefs [tui/pick! (choose "new") provider/model-catalog (constantly ["old" "new"])]
+      (is (= "new" (get-in (#'main/switch-model ctx "") [:env "BBA_MODEL"])))
+      (is (= ["Models for ollama" ["old" "new"] "old"] (last @seen))))
+    (with-redefs [tui/pick! (choose nil) provider/model-catalog (constantly ["old"])]
+      (is (= ctx (#'main/switch-provider ctx "")))
+      (is (= ctx (#'main/switch-model ctx ""))))
+    (with-redefs [tui/pick! (fn [& _] (throw (ex-info "unexpected picker" {})))
+                  provider/model-catalog (constantly ["old" "extra"])]
+      (is (= "explicit" (get-in (#'main/switch-provider ctx "openai explicit") [:env "BBA_MODEL"])))
+      (is (= "old" (get-in (#'main/switch-provider ctx "ollama") [:env "BBA_MODEL"])))
+      (is (= "direct" (get-in (#'main/switch-model ctx "direct") [:env "BBA_MODEL"])))
+      (let [plain (assoc ctx :tty? false)
+            out (with-out-str
+                  (is (= plain (#'main/switch-provider plain "")))
+                  (is (= plain (#'main/switch-model plain ""))))]
+        (is (str/includes? out "providers: anthropic, codex, ollama, openai, openrouter"))
+        (is (str/includes? out "models: old, extra"))))))

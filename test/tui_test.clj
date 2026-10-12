@@ -279,3 +279,57 @@
     (.interrupt th)
     (is (= ::interrupted (deref out 5000 ::timeout)) "the interrupt reaches the caller")
     (is (< (- (System/currentTimeMillis) t0) 5000))))
+
+;; ---------------------------------------------------------------- selection list
+
+(deftest fuzzy-ranking
+  (is (= ["GPT" "gpt-x" "g-p-t" "great-project-tool"]
+         (tui/fuzzy-matches "gPt" ["great-project-tool" "no" "g-p-t" "gpt-x" "GPT"])))
+  (is (nil? (tui/fuzzy-score "ptg" "gpt"))))
+
+(deftest fuzzy-edge-cases
+  (is (= ["z" "a"] (tui/fuzzy-matches "" ["z" "a"])))
+  (is (= [] (tui/fuzzy-matches "aa" ["a" ""])))
+  (is (= ["ab" "axb"] (tui/fuzzy-matches "ab" ["axb" "ab"])))
+  (is (= ["aB" "ab"] (tui/fuzzy-matches "ab" ["ab" "aB"])))
+  (is (= (tui/fuzzy-score "ab" "ab") (tui/fuzzy-score "AB" "AB"))))
+
+(deftest picker-keys-scroll-filter-select-and-cancel
+  (let [st (tui/picker-state "Models" ["alpha" "beta" "gamma" "delta"] "alpha" 80 6)
+        down (reduce tui/picker-key st [:down :down :down :down])
+        filtered (tui/picker-key down [:insert "GM"])]
+    (is (= [3 2] ((juxt :index :offset) down)))
+    (is (= [0 0] ((juxt :index :offset) (reduce tui/picker-key down (repeat 5 :up)))))
+    (is (= ["gamma"] (:matches filtered)))
+    (is (= [0 0] ((juxt :index :offset) filtered)))
+    (is (= [:select "gamma"] (:done (tui/picker-key filtered :enter))))
+    (is (= "G" (:query (tui/picker-key filtered :backspace))))
+    (is (= "" (:query (tui/picker-key filtered :kill-start))))
+    (doseq [key [:escape :ctrl-c]]
+      (is (= [:cancel] (:done (tui/picker-key filtered key)))))
+    (let [empty (tui/picker-key st [:insert "zzz"])]
+      (is (nil? (:done (tui/picker-key empty :enter))))
+      (is (= 0 (:index (tui/picker-key empty :down))))
+      (is (str/includes? (tui/picker-view empty) "No matches"))))
+  (is (nil? (:done (tui/picker-key (tui/picker-state "Empty" [] nil 80 8) :enter)))))
+
+(deftest picker-render-and-charm-messages
+  (let [st (tui/picker-state "Models" ["a" "b" "c" "d"] "d" 80 6)
+        view (tui/picker-view st)]
+    (is (str/includes? view "current: d"))
+    (is (str/includes? view "> * d"))
+    (is (not (str/includes? view "    a")))
+    (is (str/includes? view "Enter selects"))
+    (is (str/includes? view "Esc/Ctrl-C cancels"))
+    (is (= 6 (count (str/split-lines view))))
+    (let [[resized cmd] (tui/picker-update st (msg/window-size 20 5))]
+      (is (nil? cmd))
+      (is (= [1 3] ((juxt :rows :offset) resized)))
+      (is (every? #(<= (count %) 20) (str/split-lines (tui/picker-view resized)))))
+    (doseq [message [(msg/key-press :escape) (msg/key-press "c" :ctrl true)]]
+      (let [[cancelled cmd] (tui/picker-update st message)]
+        (is (= [:cancel] (:done cancelled)))
+        (is (some? cmd))))
+    (let [[selected cmd] (tui/picker-update st (msg/key-press :enter))]
+      (is (= [:select "d"] (:done selected)))
+      (is (some? cmd)))))

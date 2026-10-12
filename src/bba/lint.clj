@@ -12,16 +12,26 @@
 
 ;; nil = not tried yet, false = unavailable, else the clj-kondo run! fn
 (defonce ^:private runner (atom nil))
+(defonce ^:private pod (atom nil))  ; what load-pod returned, so a dead pod can be unloaded
 
 (defn- run-fn []
   (when (nil? @runner)
     (reset! runner
-            (try (pods/load-pod 'clj-kondo/clj-kondo pod-version)
+            (try (reset! pod (pods/load-pod 'clj-kondo/clj-kondo pod-version))
                  (requiring-resolve 'pod.borkdude.clj-kondo/run!)
                  (catch Throwable e
                    (ext/warn "clj-kondo pod unavailable, world forms are not linted: " (or (ex-message e) e))
                    false))))
   @runner)
+
+(defn- drop-pod!
+  "Forget a pod whose process has stopped, so the next `run-fn` loads a new one.
+  The pod shares bba's process group, so a Ctrl-C while the model works sends it
+  SIGINT too; without this every later lint throws \"Stream closed\"."
+  []
+  (when-let [p @pod] (try (pods/unload-pod p) (catch Throwable _ nil)))
+  (reset! pod nil)
+  (reset! runner nil))
 
 (def ^:private config
   ;; Forms are snippets in a live namespace: the ns header is ours, and a develop
@@ -42,16 +52,26 @@
   [{:row :col :level :type :message}] with rows counted inside `code`, or nil when
   clj-kondo is unavailable."
   [ns-name context code]
-  (when-let [run! (run-fn)]
-    (let [prefix (str (header ns-name) (str/join "\n" context) "\n")
-          offset (count (filter #{\newline} prefix))
-          f (fs/create-temp-file {:prefix "bba-lint" :suffix ".clj"})]
-      (try
-        (spit (str f) (str prefix code))
-        (->> (:findings (run! {:lint [(str f)] :config config}))
-             (filter #(> (:row % 0) offset))
-             (mapv #(-> (select-keys % [:row :col :level :type :message])
-                        (update :row - offset))))
-        (finally (fs/delete-if-exists f))))))
+  (let [prefix (str (header ns-name) (str/join "\n" context) "\n")
+        offset (count (filter #{\newline} prefix))
+        once (fn [run!]
+               (let [f (fs/create-temp-file {:prefix "bba-lint" :suffix ".clj"})]
+                 (try
+                   (spit (str f) (str prefix code))
+                   (->> (:findings (run! {:lint [(str f)] :config config}))
+                        (filter #(> (:row % 0) offset))
+                        (mapv #(-> (select-keys % [:row :col :level :type :message])
+                                   (update :row - offset))))
+                   (finally (fs/delete-if-exists f)))))]
+    (when-let [run! (run-fn)]
+      (try (once run!)
+           (catch java.io.IOException e  ; the pod process stopped: start a new one, try once more
+             (drop-pod!)
+             (try (some-> (run-fn) once)
+                  (catch Exception e2
+                    (drop-pod!)
+                    (ext/warn "clj-kondo pod failed twice (" (ex-message e) ", " (ex-message e2)
+                              "); this form is not linted")
+                    nil)))))))
 
 (defn errors [findings] (filterv #(= :error (:level %)) findings))

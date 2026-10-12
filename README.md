@@ -152,7 +152,7 @@ NOTE: An invariant about a function that you have not built yet shows a warning 
 | `/world [NAME \| new NAME \| fork NAME [REV] \| temp]` | List, switch, create or fork worlds, or open a temporary fork. See [Worlds](#worlds). |
 | `/functions`, `/describe NAME` | List the functions, or show one with its arguments, docstring and source. |
 | `/history`, `/status` | Show the revisions, or the state of the world and its checks. |
-| `/provider [NAME [MODEL]]`, `/model [NAME]` | Show or change the provider, with an optional model. The conversation stays. |
+| `/provider [NAME [MODEL]]`, `/model [NAME]` | Open a search list or use the supplied name. The conversation stays. |
 | `/reload` | Load new or changed extensions. Unload hooks run first. |
 | `/skills`, `/mcp`, `/compact` | From the core extensions. See [Core extensions](#core-extensions). |
 | `/new` | Start a new session: a new log file and an empty conversation. The world stays. |
@@ -170,6 +170,29 @@ NOTE: An invariant about a function that you have not built yet shows a warning 
 | Ctrl-O | At an empty prompt: show the full code and result of each tool call in the last turn, in a full-screen pager. Press q, Esc or Ctrl-O to close it. |
 | Ctrl-C | While the model works: stop the turn, stop any running command and restore the world. At the prompt: clear the line. |
 | Ctrl-D, `/quit` | Leave. |
+
+With no arguments, `/provider` opens a provider list in the terminal.
+The `/model` command opens the model list for the current provider.
+
+- Type a query to search. The search matches characters in order without case sensitivity.
+- Use the arrow keys to move through the list.
+- Press Enter to select the item.
+- Press Escape or Ctrl-C to cancel without a change.
+
+The list marks the current item with `*`. Exact matches come first, followed by compact matches, early matches, and shorter names.
+Backspace removes a character from the query. Ctrl-U clears the query.
+Without a terminal, these commands print lists without a prompt for selection.
+The direct commands `/provider NAME [MODEL]` and `/model NAME` still work.
+A provider change checks credentials. A failed check keeps the current provider and model.
+A provider change uses the new provider's default model unless the command supplies a model.
+To select the current provider again keeps the current model.
+
+The Codex list reads `models_cache.json` from `CODEX_HOME`, or from `~/.codex` by default.
+The list uses the cache's model slugs. It excludes entries whose visibility is not `list`, if the entry has a visibility field.
+The Ollama list uses `/api/tags` at `OLLAMA_HOST`, with a 1.5-second request limit.
+Other providers use the configured model and the provider's default model.
+Every list includes the current model. If discovery fails or returns no models, the list uses the current and default models.
+These lists do not verify that the account can use each model. Direct model names remain available.
 
 Answers stream as the model writes them. A finished line is redrawn as rendered markdown: headings, lists, quotes, rules, tables and fenced code panels, wrapped to the terminal width. A spinner shows `thinking...` or `running <tool>...`.
 
@@ -231,7 +254,7 @@ What to know:
 - **It reads, it never writes.** bba does not refresh the token, because refreshing rotates a single-use refresh token and would sign the Codex CLI out. When the token expires (about three days), run `codex login` again and restart bba.
 - **The endpoint always streams, and it speaks the Responses API,** not Chat Completions. `bba.responses` translates between the two.
 - **An empty reply is an error, not a blank answer.** The endpoint spends part of the reply budget thinking, so a turn can end with no text and no tool call — because it ran out of room (`incomplete: max_output_tokens`) or spent the whole turn reasoning. bba reports it rather than printing a blank line and leaving an empty turn in the session, as if it had finished.
-- **Model names differ from the API.** Use the names the Codex CLI uses (`gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-6-astra`); a metered-API name such as `gpt-5` is refused with \"not supported when using Codex with a ChatGPT account\". `bba --provider codex` shows the default.
+- **Model names differ from the API.** Use `/model` to select a name from the local Codex cache. A direct `/model NAME` command also works.
 - **`CODEX_BASE_URL` and `CODEX_ACCESS_TOKEN`** override the endpoint and the token (for a proxy, or for CI).
 - This endpoint is not a published API and the plan's rate limits apply. Treat it as convenient, not contractual.
 

@@ -293,6 +293,25 @@
     (is (nil? (ns-resolve 'world 'a)) "first form rolled back")
     (is (empty? (revs cwd)))))
 
+(defn- kill-kondo-pods!
+  "SIGINT every clj-kondo pod that is a child of this process, as a Ctrl-C in the
+  terminal does. Returns how many it stopped."
+  []
+  (let [pods (->> (.children (java.lang.ProcessHandle/current)) .iterator iterator-seq
+                  (filter #(str/includes? (str (.orElse (.command (.info ^java.lang.ProcessHandle %)) "")) "clj-kondo")))]
+    (doseq [h pods]
+      (p/shell "kill" "-INT" (str (.pid ^java.lang.ProcessHandle h)))
+      (.get (.onExit ^java.lang.ProcessHandle h) 5 java.util.concurrent.TimeUnit/SECONDS))
+    (count pods)))
+
+(deftest world-survives-a-stopped-lint-pod
+  (let [cwd (temp-cwd) _ (start cwd) _ (develop "(defn add [a b] (+ a b))")]
+    (is (pos? (kill-kondo-pods!)) "the pod must be running and stopped, or this test proves nothing")
+    (testing "the next form runs, not \"Stream closed\""
+      (is (= :accepted (:status (execute "(+ 1 1)")))))
+    (testing "lint works again with a new pod"
+      (is (= :invalid-arity (-> (execute "(add 1)") :lint first :type))))))
+
 (deftest lint-rejects-errors-before-evaluation
   (let [cwd (temp-cwd) _ (start cwd) _ (develop "(defn add [a b] (+ a b))")]
     (testing "unresolved symbol: rejected, nothing evaluated, no revision"

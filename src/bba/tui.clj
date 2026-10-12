@@ -230,3 +230,102 @@
                 :ctrl-c :message
                 :dark-background? true})
   nil)
+
+;; ---------------------------------------------------------------- selection list
+
+(defn fuzzy-score
+  "Pure: a case-insensitive subsequence score. Lower scores rank first; nil rejects."
+  [query candidate]
+  (let [q (str/lower-case query) s (str/lower-case candidate)]
+    (if (empty? q)
+      [0 0 0 0]
+      (->> (range (count s))
+           (keep (fn [start]
+                   (when (= (first q) (nth s start))
+                     (loop [qi 1 end start]
+                       (if (= qi (count q))
+                         [(if (= q s) 0 1)
+                          (- (inc (- end start)) (count q)) start (count s)]
+                         (when-let [next-pos (str/index-of s (str (nth q qi)) (inc end))]
+                           (recur (inc qi) next-pos)))))))
+           sort first))))
+
+(defn fuzzy-matches
+  "Pure: rank names by match score, then name. Empty queries retain catalog order."
+  [query items]
+  (if (empty? query)
+    (vec items)
+    (->> items
+         (keep #(when-let [score (fuzzy-score query %)] [score (str/lower-case %) %]))
+         sort (mapv last))))
+
+(defn- picker-fit [{:keys [matches index offset rows] :as st}]
+  (let [index (max 0 (min index (dec (count matches))))
+        offset (max 0 (min offset index (max 0 (- (count matches) rows))))
+        offset (if (>= index (+ offset rows)) (inc (- index rows)) offset)]
+    (assoc st :index index :offset offset)))
+
+(defn picker-state
+  "Pure: create a picker with the current item selected."
+  [title items current columns lines]
+  (let [items (vec (distinct items))]
+    (picker-fit {:title title :items items :current current :query "" :matches items
+                 :index (or (first (keep-indexed #(when (= %2 current) %1) items)) 0)
+                 :offset 0 :rows (max 1 (- lines 4)) :columns (max 1 columns)})))
+
+(defn picker-key
+  "Pure: apply a key. Enter selects; Escape and Ctrl-C cancel without a value."
+  [{:keys [query matches index] :as st} key]
+  (if (:done st)
+    st
+    (let [[k arg] (if (vector? key) key [key])
+          query' (case k
+                   :insert (str query (str/replace arg #"[\p{Cntrl}]" ""))
+                   :backspace (subs query 0 (max 0 (dec (count query))))
+                   :kill-start ""
+                   query)]
+      (cond
+        (contains? #{:escape :ctrl-c} k) (assoc st :done [:cancel])
+        (= k :enter) (if-let [value (get matches index)] (assoc st :done [:select value]) st)
+        (not= query query') (picker-fit (assoc st :query query' :index 0 :offset 0
+                                               :matches (fuzzy-matches query' (:items st))))
+        (= k :up) (picker-fit (update st :index dec))
+        (= k :down) (picker-fit (update st :index inc))
+        :else st))))
+
+(defn picker-update
+  "Pure: handle a charm message without an input loop."
+  [st m]
+  (let [next-state (cond
+                     (msg/window-size? m) (picker-fit (assoc st :columns (max 1 (:width m))
+                                                             :rows (max 1 (- (:height m) 4))))
+                     (msg/paste? m) (picker-key st [:insert (str (:text m))])
+                     (msg/key-match? m "esc") (picker-key st :escape)
+                     :else (picker-key st (press->key m)))]
+    [next-state (when (:done next-state) program/quit-cmd)]))
+
+(defn picker-view
+  "Pure: show the query, current item, visible matches, and controls."
+  [{:keys [title current query matches index offset rows columns]}]
+  (let [clip (fn [s] (let [s (str/replace (str s) #"[\p{Cntrl}]" "")]
+                       (subs s 0 (min columns (count s)))))
+        visible (subvec matches offset (min (count matches) (+ offset rows)))
+        lines (concat [(str title " · current: " current) (str "Search: " query)]
+                      (if (seq visible)
+                        (map-indexed (fn [i item]
+                                       (str (if (= index (+ offset i)) "> " "  ")
+                                            (if (= item current) "* " "  ") item)) visible)
+                        ["No matches"])
+                      [(str (count matches) " matches · * current")
+                       "↑ ↓ move · Enter selects · Esc/Ctrl-C cancels"])]
+    (str/join "\n" (map clip lines))))
+
+(defn pick!
+  "Run a charm selection list after the prompt exits. Return nil on cancel."
+  [title items current]
+  (let [result (program/run {:init (picker-state title items current (width) (height))
+                             :update picker-update :view picker-view
+                             :alt-screen true :overflow :bottom
+                             :ctrl-c :message :bracketed-paste true :dark-background? true})
+        [action value] (:done result)]
+    (when (= action :select) value)))
