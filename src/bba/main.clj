@@ -5,6 +5,8 @@
             [bba.core :as core]
             [bba.ext :as ext]
             [bba.provider :as provider]
+            [bba.md :as md]
+            [bba.toolview :as toolview]
             [bba.tui :as tui]
             [bba.ui :as ui]
             [bba.world :as world]
@@ -39,29 +41,108 @@
 
 ;; ---------------------------------------------------------------- one turn
 
+(defn- rows-used
+  "Screen rows that `s` (no newlines) takes when printed from column 0 at `w` columns."
+  [s w]
+  (max 1 (long (Math/ceil (/ (md/width-of s) (double (max 1 w)))))))
+
 (defn- stream-printer
-  "Prints streamed text as it arrives. When a line ends, redraws it with markdown
-  formatting (if it fit on one screen row). Returns {:text f :end-line f :streamed? atom}."
-  []
-  (let [line (StringBuilder.) fence (atom false) streamed (atom false) w (tui/width)
+  "Prints text as it streams, then redraws each finished line as rendered markdown:
+  it moves the cursor up over the rows the raw text took, clears them, and prints the
+  rendered rows. Table rows are held until the table ends, since a column's width
+  depends on every row; then the whole table is redrawn at once. Anything taller
+  than the screen has scrolled out of reach, so it is left as the terminal showed
+  it. The renderer context is carried across lines, so a fenced block stays open and
+  its rows are padded. A blank line still goes through the renderer, because inside
+  a fence it is a panel row. Returns {:text f :end-line f :flush f :streamed? atom}."
+  [ctx]
+  (let [md-ctx (atom (or (:md ctx) (md/context {:width (tui/width)})))
+        w (:width @md-ctx)
+        h (tui/height)
+        line (StringBuilder.)   ; the whole line so far
+        shown (StringBuilder.)  ; the part of it already printed raw
+        table (atom [])         ; raw table rows waiting for the table to end
+        table-rows (atom 0)     ; screen rows those raw table rows take
+        streamed (atom false)
+        redraw! (fn [up s]      ; replace the `up` rows above (and this one) with s
+                  (if (and (:render @md-ctx) (< up h))
+                    (do (print (str "\r" (when (pos? up) (str "\u001b[" up "A")) "\u001b[J" s)) true)
+                    false))
+        table-str (fn [] (when (seq @table)
+                           (str (md/render @md-ctx (str/join "\n" @table)) "\n")))
+        reset-table! (fn [] (reset! table []) (reset! table-rows 0))
         end-line (fn []
-                   (when (pos? (.length line))
-                     (let [l (str line) [f r] (ui/md-line @fence l)]
-                       (reset! fence f)
-                       (when (< (count l) w) (print (str "\r\u001b[K" r)))
-                       (println)
-                       (.setLength line 0))))]
+                   (let [l (str line)]
+                     (if (and (:render @md-ctx) (not (:fence @md-ctx)) (md/table-row? l))
+                       (do (println (subs l (.length shown)))
+                           (swap! table conj l)
+                           (swap! table-rows + (rows-used l w)))
+                       (let [up (+ @table-rows (dec (rows-used (str shown) w)))
+                             tbl (table-str)
+                             [c rows] (md/md-line @md-ctx l)]
+                         (reset! md-ctx c)
+                         (when-not (redraw! up (str tbl (md/rows-str rows)))
+                           (print (subs l (.length shown))))
+                         (println)
+                         (reset-table!))))
+                   (.setLength line 0)
+                   (.setLength shown 0))
+        finish-line (fn []
+                      (cond (pos? (.length line)) (end-line)
+                            (seq @table) (do (redraw! @table-rows (table-str)) (reset-table!))))]
     {:streamed? streamed
      :end-line end-line
+     :flush finish-line
      :text (fn [s]
              (reset! streamed true)
              (doseq [part (str/split s #"(?<=\n)")]
                (if (str/ends-with? part "\n")
-                 (do (print (subs part 0 (dec (count part))))
-                     (.append line (subs part 0 (dec (count part))))
-                     (if (pos? (.length line)) (end-line) (println)))
-                 (do (print part) (.append line part))))
+                 (do (.append line (subs part 0 (dec (count part))))
+                     (end-line))
+                 (do (.append line part) (.append shown part) (print part))))
              (flush))}))
+
+(defonce ^:private call-seq (atom 0))
+
+(defn- detail-file
+  "Where a tool call's full detail goes: a folder beside the session file, which
+  sits in the git-ignored sessions folder. nil without a session."
+  [ctx tool]
+  (when-let [sf (:session-file ctx)]
+    (str (fs/absolutize (fs/path (str (fs/strip-ext sf) ".calls")
+                                 (format "%03d-%s.md" (swap! call-seq inc) tool))))))
+
+(defn- tool-shower
+  "The :show handler for a terminal: each call is one collapsed line whose label
+  links to a file with its full detail, and each finished call is added to
+  (:calls ctx) for Ctrl-O."
+  [ctx live out]
+  (let [pending (atom nil)
+        width (or (get-in ctx [:md :width]) (tui/width))]
+    (fn [{:keys [phase tool input content error?]}]
+      (when @live
+        ((:flush out))
+        (if (= phase :call)
+          (let [f (detail-file ctx tool)]
+            (reset! pending f)
+            (ui/log! (toolview/call-str tool input width (some->> f (str "file://"))))
+            (ui/start! (str "running " tool "...")))
+          (let [d (toolview/detail-md tool input content)]
+            (when-let [f @pending]
+              (try (fs/create-dirs (fs/parent f)) (spit f d)
+                   (catch Exception _ nil)))  ; a missing detail file must not stop the turn
+            (some-> (:calls ctx) (swap! conj d))
+            (ui/log! (toolview/result-str tool content error? width))
+            (ui/stop!)))))))
+
+(defn show-calls
+  "Ctrl-O: the full detail of the last turn's tool calls, rendered, in a full-screen
+  pager. Closing it (q, Esc or Ctrl-O again) brings back the conversation as it was."
+  [ctx]
+  (let [ds (some-> (:calls ctx) deref)]
+    (if (empty? ds)
+      (println (ui/dim "(no tool calls in the last turn)"))
+      (tui/page! (md/render (or (:md ctx) (md/context {:width (tui/width)})) (str/join "\n" ds))))))
 
 (defn- agent-run
   "One user message through the loop. Returns [status new-messages].
@@ -69,24 +150,19 @@
   [ctx messages text]
   (let [umsg (core/user-message text)
         live (:live ctx (atom true))
-        out (when (:stream? ctx) (stream-printer))
+        out (when (:stream? ctx) (stream-printer ctx))
         ctx (cond-> ctx
               out (assoc :on-request #(when @live (ui/start! "thinking..."))
                          :on-text #(when @live (ui/stop!) ((:text out) %))
-                         :show (fn [s]  ; "→ tool ..." before a tool runs, "← ..." after
-                                 (when @live
-                                   ((:end-line out))
-                                   (ui/log! (ui/dim s))
-                                   (if-let [[_ tool] (re-find #"^→ (\S+)" s)]
-                                     (ui/start! (str "running " tool "..."))
-                                     (ui/stop!))))))]
+                         :show (tool-shower ctx live out)))]
+    (some-> (:calls ctx) (reset! []))
     (core/log-message! ctx umsg)
     (try
       (let [{:keys [status text messages]} (core/run-turns ctx (conj messages umsg))]
         (ui/stop!)
         (if (and out @(:streamed? out))
-          ((:end-line out))
-          (println (ui/md text)))
+          ((:flush out))
+          (println (md/render (or (:md ctx) (md/context {:width (tui/width)})) text)))
         [status messages])
       (finally (ui/stop!)))))
 
@@ -186,13 +262,14 @@
    (println (ui/bold "bba") "— session" (ui/dim (:session-file ctx)))
    (println (str "provider: " (provider/provider-name (:env ctx)) ", model: " (provider/model-name (:env ctx))))
    (when (seq messages) (println (ui/dim (str "continuing: " (count messages) " messages"))))
-   (println (ui/dim (str (help-text) (when (:tty? ctx) " | Enter sends, \\ or Alt+Enter = new line, Ctrl-C stops"))))
+   (println (ui/dim (str (help-text) (when (:tty? ctx) " | Enter sends, \\ or Alt+Enter = new line, Ctrl-O shows tool calls, Ctrl-C stops"))))
    (let [read-entry (line-reader ctx in)]
-     (loop [ctx ctx messages messages]
+     (loop [ctx (assoc ctx :calls (atom [])) messages messages]
        (let [line (read-entry)]
          (cond
            (nil? line) 0
            (= :cancel line) (do (println (ui/dim "(Ctrl-D or /quit to exit)")) (recur ctx messages))
+           (= :expand line) (do (show-calls ctx) (recur ctx messages))
            (str/blank? line) (recur ctx messages)
            (#{"/quit" "/exit"} (str/trim line)) 0
            (= "/new" (str/trim line))
@@ -244,7 +321,7 @@
   [{:keys [args cwd env in tty?]}]
   (let [{:keys [prompt max-turns error help warn] :as opts} (parse-args args)
         env (cond-> env (:provider opts) (assoc "BBA_PROVIDER" (:provider opts))
-                        (:model opts) (assoc "BBA_MODEL" (:model opts)))
+                    (:model opts) (assoc "BBA_MODEL" (:model opts)))
         home (or (get env "BBA_HOME") (str (fs/path (System/getProperty "user.home") ".bba")))]
     (ui/enable! tty?)
     (cond
@@ -267,6 +344,7 @@
                  :max-turns (or max-turns (some-> (get env "BBA_MAX_TURNS") parse-long))
                  :print (when-not prompt println)
                  :tty? (boolean tty?)
+                 :md (md/context {:width (when tty? (tui/width)) :render (ui/enabled?)})
                  :stream? (boolean (and tty? (not prompt)))}
             world (try {:info (world/start! (assoc ctx :world (or (some-> temp :name) (:world opts) from-session)))}
                        (catch clojure.lang.ExceptionInfo e {:error (ex-message e)}))]

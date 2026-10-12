@@ -160,8 +160,8 @@
           {:caps (get-in d [:result :capabilities])
            :info (get-in d [:result :_meta "io.modelcontextprotocol/serverInfo"])})
       (let [i (rpc srv "initialize" {:protocolVersion legacy-version
-                                      :capabilities {}
-                                      :clientInfo {"name" "bba" "version" "0.1.0"}}
+                                     :capabilities {}
+                                     :clientInfo {"name" "bba" "version" "0.1.0"}}
                    handshake-ms)]
         (if-let [res (:result i)]
           (do (reset! (:era srv) :legacy)
@@ -196,8 +196,8 @@
                         "image" (str "[image " (:mimeType b) "]")
                         "audio" (str "[audio " (:mimeType b) "]")
                         "resource" (let [r (:resource b)]
-                                      (str "[" (:uri r) "]\n"
-                                           (or (:text r) (str "<" (or (:mimeType r) "binary") ">"))))
+                                     (str "[" (:uri r) "]\n"
+                                          (or (:text r) (str "<" (or (:mimeType r) "binary") ">"))))
                         (str "<" (:type b) ">")))
                     content))))
 
@@ -334,18 +334,18 @@
         (str "  " sname " - " (get status sname "not started"))))))
 
 (ext/on! :session-start
-        (fn [_ ctx]
-          (try (register-all! ctx)
-               (catch Exception e (ext/warn "mcp: setup failed: " (ex-message e))))))
+         (fn [_ ctx]
+           (try (register-all! ctx)
+                (catch Exception e (ext/warn "mcp: setup failed: " (ex-message e))))))
 
 ;; On /reload (and with --no-extensions) the kernel drops extension registrations
 ;; and runs their unloaders first, so the servers this load started are stopped.
 (ext/on-unload! stop-all!)
 
 (ext/register-command! "mcp"
-  (fn [args ctx]
-    (case (str/trim (str args))
-      "stop" (do (stop-all!) (println "mcp: stopped every server"))
-      (do (println "MCP servers:")
-          (doseq [l (status-lines ctx)] (println l))
-          (println "  usage: /mcp | /mcp stop")))))
+                       (fn [args ctx]
+                         (case (str/trim (str args))
+                           "stop" (do (stop-all!) (println "mcp: stopped every server"))
+                           (do (println "MCP servers:")
+                               (doseq [l (status-lines ctx)] (println l))
+                               (println "  usage: /mcp | /mcp stop")))))

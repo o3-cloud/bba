@@ -1,8 +1,25 @@
 {:paths ["src" "test"]
+ :deps {de.timokramer/charm.clj {:mvn/version "0.2.123"}}
  :tasks
  {test  {:doc  "Run the bba tests (offline, fake provider)"
-         :task (let [_ (require 'clojure.test 'bba-test 'codex-test 'providers-test 'tui-test 'world-test)
-                     {:keys [fail error]} ((resolve 'clojure.test/run-tests) 'bba-test 'codex-test 'providers-test 'tui-test 'world-test)]
+         :task (let [tests '[bba-test codex-test md-test providers-test tui-test world-test]
+                     _ (apply require 'clojure.test tests)
+                     {:keys [fail error]} (apply (resolve 'clojure.test/run-tests) tests)]
                  (when (pos? (+ fail error)) (System/exit 1)))}
+  lint  {:doc  "clj-kondo, cljfmt check, splint and carve over src, test and extensions"
+         :task (let [dirs ["src" "test" "extensions"]
+                     ok? (fn [r] (zero? (:exit r)))
+                     kondo (< (:exit (apply shell {:continue true} "clj-kondo" "--fail-level" "error" "--lint" dirs)) 2)
+                     fmt (ok? (apply shell {:continue true} "cljfmt" "check" dirs))
+                     _ (apply shell {:continue true} "bb" "clojure" "-Sdeps"
+                              "{:deps {io.github.noahtheduke/splint {:mvn/version \"1.25.0\"}}}"
+                              "-M" "-m" "noahtheduke.splint" dirs)  ; style advice: reported, never fails the task
+                     carve (ok? (shell {:continue true} "bb" "clojure" "-Sdeps"
+                                       "{:deps {io.github.borkdude/carve {:git/url \"https://github.com/borkdude/carve\" :git/sha \"fdd1d0bc432f63db69e3a72167ef5e46f10dfba7\"}}}"
+                                       "-M" "-m" "carve.main" "--opts"
+                                       (pr-str {:paths dirs :report {:format :text} :api-namespaces (quote [bba.ext bba.main bba.ui])})))]
+                 (when-not (and kondo fmt carve) (System/exit 1)))}
+  fmt   {:doc  "Format src, test and extensions with cljfmt"
+         :task (shell "cljfmt" "fix" "src" "test" "extensions")}
   agent {:doc  "Run the agent: bb agent [-p PROMPT]"
          :task (apply (requiring-resolve 'bba.main/-main) *command-line-args*)}}}

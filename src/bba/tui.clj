@@ -1,12 +1,17 @@
 (ns bba.tui
-  "A small line editor for the interactive prompt: raw-mode keys, history, multi-line input, paste.
-  Keys -> edit state is pure (`handle-key`); so is screen layout (`cursor-at`)."
+  "The interactive line editor, built on charm.clj. Key presses arrive as charm
+  messages; charm message -> edit state is pure (`press->key`, `handle-key`), and so
+  is the rendered frame (`view-str`). charm owns raw mode, wrapping and redrawing."
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
             [cheshire.core :as json]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [charm.components.viewport :as vp]
+            [charm.message :as msg]
+            [charm.program :as program]
+            [charm.style.core :as style]))
 
-(def cont "  ")  ; prefix for continuation lines
+;; The continuation prefix is derived from the prompt in `view-str`, so no `cont` def.
 
 ;; ---------------------------------------------------------------- terminal
 
@@ -24,6 +29,10 @@
 (defn width []
   (let [w (some-> (stty "size") (str/split #" ") second parse-long)]
     (if (and w (pos? w)) w 80)))  ; a pty with no size set reports 0
+
+(defn height []
+  (let [h (some-> (stty "size") (str/split #" ") first parse-long)]
+    (if (and h (pos? h)) h 24)))
 
 ;; ---------------------------------------------------------------- history
 
@@ -87,103 +96,137 @@
       :kill-word  (delete-range st (word-start buf pos) pos)
       :up         (history-move st -1)
       :down       (history-move st 1)
+      :expand     (if (str/blank? buf) (assoc st :done [:expand]) st)  ; only at an empty prompt
       :ctrl-c     (if (str/blank? buf) (assoc st :done [:cancel]) (assoc st :buf "" :pos 0))
       :ctrl-d     (cond (= "" buf) (assoc st :done [:eof])
                         (< pos (count buf)) (delete-range st pos (inc pos))
                         :else st)
       st)))
+;; Layout is charm's job now: `view-str` renders one frame, and charm wraps, diffs and
+;; redraws it. The old hand-rolled `display`/`cursor-at` column arithmetic is gone.
+;; ---------------------------------------------------------------- charm bridge
 
-;; ---------------------------------------------------------------- layout
+(def ^:private named-keys
+  {:enter :enter :backspace :backspace :delete :delete :left :left :right :right
+   :up :up :down :down :home :home :end :end :tab :tab :space [:insert " "]
+   :page-up :up :page-down :down :escape nil})
 
-(defn display
-  "The plain text shown on screen for prompt + buffer (continuation lines get `cont`)."
-  [prompt s]
-  (str prompt (str/replace s "\n" (str "\n" cont))))
+(defn press->key
+  "Pure: one charm message -> this editor's key vocabulary, or nil for a message the
+  editor ignores (window resizes, focus changes, keys it does not bind)."
+  [m]
+  (when (msg/key-press? m)
+    (let [k (:key m)
+          c (when (and (string? k) (:ctrl m)) (str/lower-case k))]
+      (cond
+        (and c (= c "c")) :ctrl-c
+        (and c (= c "d")) :ctrl-d
+        (and c (= c "w")) :kill-word
+        (and c (= c "u")) :kill-start
+        (and c (= c "k")) :kill-end
+        (and c (= c "a")) :home
+        (and c (= c "e")) :end
+        (and c (= c "b")) :left
+        (and c (= c "f")) :right
+        (and c (= c "p")) :up
+        (and c (= c "n")) :down
+        (and c (= c "o")) :expand
+        ;; a real Alt+Enter is ESC CR, which charm reports as the rune "\r" with :alt
+        (and (:alt m) (contains? #{:enter "\r" "\n"} k)) :newline
+        (keyword? k) (get named-keys k)
+        (string? k) [:insert k]
+        :else nil))))
 
-(defn display-index
-  "Index in (display prompt buf) of buffer index `pos`."
-  [prompt buf pos]
-  (+ (count prompt) pos (* (count cont) (count (re-seq #"\n" (subs buf 0 pos))))))
+(def ^:private caret-style (style/style :reverse true))
 
-(defn cursor-at
-  "Pure: [row col] where the next character after `s` goes, wrapping at `w` columns."
-  [s w]
-  (reduce (fn [[r c] ch]
-            (cond (= ch \newline) [(inc r) 0]
-                  (>= c (dec w)) [(inc r) 0]
-                  :else [r (inc c)]))
-          [0 0] s))
+(defn view-str
+  "Pure: the charm view for one frame -- the shown prompt, the buffer with a blank
+  continuation prefix on every newline, and a reverse-video caret at the cursor (a
+  space when the cursor is past the end). `plain` is the prompt without styling: its
+  width, not the shown prompt's, decides the continuation indent, so ANSI escapes in
+  the styled prompt cannot shift the layout."
+  [plain shown {:keys [buf pos]}]
+  (let [buf (or buf "")
+        pos (or pos 0)
+        cur (if (< pos (count buf)) (subs buf pos (inc pos)) " ")
+        marked (str (subs buf 0 pos) (style/render caret-style cur)
+                    (subs buf (min (inc pos) (count buf))))
+        blank (apply str (repeat (count plain) " "))]
+    (str shown (str/replace marked "\n" (str "\n" blank)))))
 
 ;; ---------------------------------------------------------------- read loop
 
-(defn- read-key
-  "Read one key from `in` (a UTF-8 Reader in raw mode)."
-  [^java.io.Reader in]
-  (let [c (.read in)]
-    (case c
-      -1 [:ctrl-d]
-      (13 10) :enter
-      (127 8) :backspace
-      1 :home, 5 :end, 2 :left, 6 :right, 16 :up, 14 :down
-      3 :ctrl-c, 4 :ctrl-d, 11 :kill-end, 21 :kill-start, 23 :kill-word, 12 :clear
-      27 (let [c2 (.read in)]
-           (case c2
-             (13 10) :newline                                ; Alt+Enter
-             79 (case (char (.read in)) \A :up \B :down \C :right \D :left \H :home \F :end nil)
-             91 (let [params (loop [sb (StringBuilder.)]
-                               (let [ch (char (.read in))]
-                                 (if (<= 0x40 (int ch) 0x7e) (str sb ch) (recur (.append sb ch)))))]
-                  (case params
-                    "A" :up, "B" :down, "C" :right, "D" :left
-                    ("H" "1~" "7~") :home, ("F" "4~" "8~") :end, "3~" :delete
-                    "200~" [:insert (loop [sb (StringBuilder.)]          ; bracketed paste
-                                      (let [s (str sb)]
-                                        (if (str/ends-with? s "\u001b[201~")
-                                          (str/replace (subs s 0 (- (count s) 6)) #"\r\n?" "\n")
-                                          (recur (.append sb (char (.read in)))))))]
-                    nil))
-             nil))
-      (if (>= c 32) [:insert (str (char c))] nil))))
-
-(defn- render!
-  "Redraw prompt + buffer. `row` = cursor row (from the input start) after the last draw. Returns the new row."
-  [{:keys [buf pos]} prompt shown-prompt w row]
-  (let [shown (display prompt buf)
-        [er ec] (cursor-at shown w)
-        [cr cc] (cursor-at (subs shown 0 (display-index prompt buf pos)) w)
-        out (StringBuilder.)]
-    (.append out (str "\r" (when (pos? row) (str "\u001b[" row "A")) "\u001b[J"))
-    (.append out (str shown-prompt (str/replace (subs shown (count prompt)) "\n" "\r\n")))
-    (when (and (zero? ec) (pos? er) (not (str/ends-with? shown "\n")))
-      (.append out " \r\u001b[K"))                                  ; leave the pending-wrap state
-    (when (> er cr) (.append out (str "\u001b[" (- er cr) "A")))
-    (.append out (str "\r" (when (pos? cc) (str "\u001b[" cc "C"))))
-    (print (str out)) (flush)
-    cr))
+(defn- entry-update
+  "One charm message -> [state cmd]. Sets :done on the state when the entry finishes."
+  [st m]
+  (cond
+    (msg/paste? m) [(handle-key st [:insert (str/replace (str (:text m)) "\r\n" "\n")]) nil]
+    :else
+    (if-let [k (press->key m)]
+      (let [st' (handle-key st k)]
+        (if (:done st')
+          ;; park the caret at the end for the final frame, then stop the loop
+          [(assoc st' :pos (count (str (:buf st')))) program/quit-cmd]
+          [st' nil]))
+      [st nil])))
 
 (defn read-line!
-  "Read one entry with editing. Returns the text, nil on EOF, or :cancel on Ctrl-C at an empty prompt.
-  `hist` is an atom holding the history vector; entries are saved to `history-file`."
+  "Read one entry with editing. Returns the text, nil on EOF, or :cancel on Ctrl-C at
+  an empty prompt. `hist` is an atom holding the history vector; entries are saved to
+  `history-file`."
   [{:keys [prompt shown-prompt hist history-file]}]
-  (let [saved (stty "-g")
-        in (java.io.InputStreamReader. System/in "UTF-8")
-        w (width)
-        shown-prompt (or shown-prompt prompt)]
-    (try
-      (stty "raw" "-echo")
-      (print "\u001b[?2004h")
-      (loop [st (new-state @hist) row (render! (new-state @hist) prompt shown-prompt w 0)]
-        (let [key (read-key in)
-              st (if (= key :clear) (do (print "\u001b[H\u001b[2J") st) (handle-key st key))
-              row (render! (if (:done st) (assoc st :pos (count (:buf st))) st) prompt shown-prompt w
-                           (if (= key :clear) 0 row))]
-          (if-let [[kind text] (:done st)]
-            (do (print "\r\n") (flush)
-                (case kind
-                  :submit (do (swap! hist add-history history-file text) text)
-                  :eof nil
-                  :cancel :cancel))
-            (recur st row))))
-      (finally
-        (print "\u001b[?2004l") (flush)
-        (stty saved)))))
+  (let [plain (or prompt "> ")
+        shown (or shown-prompt plain)
+        res (program/run {:init (new-state @hist)
+                          :update entry-update
+                          :view (partial view-str plain shown)
+                          :ctrl-c :message
+                          :bracketed-paste true
+                          ;; pinned: the background query runs at every prompt, and
+                          ;; it eats keys typed before the prompt shows
+                          :dark-background? true})]
+    (println) (flush)
+    (let [[kind text] (:done res)]
+      (case kind
+        :submit (do (swap! hist add-history history-file text) text)
+        :eof nil
+        :cancel :cancel
+        :expand :expand
+        nil))))
+
+;; ---------------------------------------------------------------- pager
+
+(def ^:private close-keys ["q" "esc" "ctrl+o" "enter" "ctrl+c"])
+
+(defn- pager-footer [vp]
+  (let [n (vp/viewport-line-count vp) h (:height vp)
+        pct (if (<= n h) 100 (int (* 100 (vp/viewport-scroll-percent vp))))]
+    (style/render (style/style :faint true)
+                  (str " q or Ctrl-O closes · ↑ ↓ PgUp PgDn g G scroll · " pct "%"))))
+
+(defn pager-update
+  "Pure: one charm message -> [pager-state cmd]. A resize sizes the viewport to the
+  screen less the footer row; a close key quits; anything else scrolls."
+  [{:keys [vp] :as st} m]
+  (cond
+    (msg/window-size? m)
+    [(assoc st :vp (vp/viewport-set-dimensions vp (:width m) (max 1 (dec (:height m))))) nil]
+
+    (some #(msg/key-match? m %) close-keys) [st program/quit-cmd]
+
+    :else (let [[vp' _] (vp/viewport-update vp m)] [(assoc st :vp vp') nil])))
+
+(defn pager-view [{:keys [vp]}] (str (vp/viewport-view vp) "\n" (pager-footer vp)))
+
+(defn page!
+  "Show `content` full screen on the alternate screen until a close key, then put
+  the screen back as it was, so the conversation reappears untouched."
+  [content]
+  (program/run {:init {:vp (vp/viewport content :height (max 1 (dec (height))))}
+                :update pager-update
+                :view pager-view
+                :alt-screen true
+                :overflow :bottom
+                :ctrl-c :message
+                :dark-background? true})
+  nil)

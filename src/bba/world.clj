@@ -403,7 +403,7 @@
     (ext/register-command! "abort" (fn [_ _] (println "nothing to abort (Ctrl-C stops a running operation)")))
     (ext/register-command! "functions" (fn [_ _] (let [c (catalogue)]
                                                    (if (empty? c) (println "no functions yet")
-                                                       (doseq [e c] (println (str (:name e)) (ui/dim (or (first-line (:doc e)) "")))))) ))
+                                                       (doseq [e c] (println (str (:name e)) (ui/dim (or (first-line (:doc e)) ""))))))))
     (ext/register-command! "describe" (fn [args _] (describe args)))
     (ext/register-command! "history" (fn [_ _] (history)))
     (ext/register-command! "status" (fn [_ _] (status)))))
@@ -481,7 +481,7 @@
   []
   (when-let [{:keys [dir pid temporary?]} @state]
     (store/unlock! dir pid)
-    (when temporary? (store/delete-world! dir)))
+    (when temporary? (store/delete-world! dir))))
 
 (defn current-name [] (:name @state))
 
@@ -548,14 +548,14 @@
                     (created (create! b) (str "created world " b "; switch with /world " b))
                     (println world-usage))
       (= "temp" a) (let [r (create! (store/temporary-name) :temporary)]
-                    (if (:error r)
-                      (println (ui/red (:error r)))
-                      (let [i (:ok r) switched (switch! (:name i))]
-                        (if (:error switched)
-                          (println (ui/red (:error switched)))
-                          (println (ui/green (str "switched to temporary fork from " (:source i) " r" (:rev i)
-                                                  "; it will be destroyed when the session ends"))))))
-                    nil)
+                     (if (:error r)
+                       (println (ui/red (:error r)))
+                       (let [i (:ok r) switched (switch! (:name i))]
+                         (if (:error switched)
+                           (println (ui/red (:error switched)))
+                           (println (ui/green (str "switched to temporary fork from " (:source i) " r" (:rev i)
+                                                   "; it will be destroyed when the session ends"))))))
+                     nil)
       (= "fork" a) (let [rev (if c (parse-long c) :current)]
                      (if (and b rev)
                        (created (create! b rev) (str "forked " (current-name) " r" (if (= :current rev) (:rev @state) rev)
@@ -567,4 +567,4 @@
                 (println (ui/red (:error r)))
                 (let [i (:ok r)]
                   (println (ui/green (str "world: " (:name i) ", revision " (:rev i) ", " (:functions i) " functions")))
-                  i)))))))
+                  i))))))

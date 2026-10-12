@@ -18,7 +18,7 @@
         (mapcat (fn [{:keys [role content]}]
                   (let [bs (blocks content) text (text-of bs)]
                     (if (= role "assistant")
-                      [(cond-> {:role "assistant" :content (not-empty text)}
+                      [(cond-> {:role "assistant" :content text}  ; "" not null: Ollama rejects a null content
                          (seq (of-type "tool_use" bs))
                          (assoc :tool_calls (mapv (fn [{:keys [id name input]}]
                                                     {:id id :type "function"

@@ -5,7 +5,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [bba.ext :as ext]
-            [bba.provider :as provider]))
+            [bba.provider :as provider]
+            [bba.toolview :as toolview]))
 
 (def default-max-turns 200)
 
@@ -155,23 +156,26 @@
 
 ;; ---------------------------------------------------------------- loop
 
-(defn- show [ctx s] (when-let [p (or (:show ctx) (:print ctx))] (p s)))
-
-(defn- clip [s n] (if (> (count s) n) (str (subs s 0 n) "...") s))
+(defn- show
+  "Report a tool event {:phase :call|:result :tool name :text rendered} to (:show ctx),
+  or print its text with (:print ctx)."
+  [ctx ev]
+  (if-let [f (:show ctx)] (f ev) (when-let [p (:print ctx)] (p (:text ev)))))
 
 (defn run-turns
   "Call the provider until it stops asking for tools.
   Returns {:status :ok|:max-turns, :text final-text, :messages all-messages}."
   [ctx messages]
   (let [call (or (ext/provider) (provider/from-env (:env ctx)))
-        max-turns (or (:max-turns ctx) default-max-turns)]
+        max-turns (or (:max-turns ctx) default-max-turns)
+        width (or (get-in ctx [:md :width]) 80)]
     (loop [messages messages turn 0]
       (if (>= turn max-turns)
         {:status :max-turns :messages messages
          :text (str "stopped: reached max turns (" max-turns ")")}
         (let [_ (when-let [f (:on-request ctx)] (f))
               base (cond-> {:messages messages :system (prompt-for ctx) :tools (tool-specs)}
-                           (:on-text ctx) (assoc :on-text (:on-text ctx)))
+                     (:on-text ctx) (assoc :on-text (:on-text ctx)))
               reply (call (apply-request-hooks base ctx))
               amsg {:role "assistant" :content (:content reply)}
               uses (filter #(= "tool_use" (:type %)) (:content reply))
@@ -181,11 +185,12 @@
             {:status :ok :messages messages
              :text (str/join "\n" (keep #(when (= "text" (:type %)) (:text %)) (:content reply)))}
             (let [results (mapv (fn [u]
-                                  (show ctx (str "→ " (:name u) " " (clip (json/generate-string (:input u)) 200)))
+                                  (show ctx {:phase :call :tool (:name u) :input (:input u)
+                                             :text (toolview/call-str (:name u) (:input u) width)})
                                   (let [r (run-tool u ctx)]
-                                    (show ctx (if (:is_error r)
-                                                (str "← error: " (clip (:content r) 200))
-                                                (str "← " (count (:content r)) " chars")))
+                                    (show ctx {:phase :result :tool (:name u) :input (:input u)
+                                               :content (:content r) :error? (boolean (:is_error r))
+                                               :text (toolview/result-str (:name u) (:content r) (:is_error r) width)})
                                     r))
                                 uses)
                   umsg {:role "user" :content results}]

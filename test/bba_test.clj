@@ -31,7 +31,6 @@
 
 (defn tool-use [id name input] {:type "tool_use" :id id :name name :input input})
 
-
 (defn text [s] {:type "text" :text s})
 
 (defn tool-names [req] (set (map :name (:tools req))))
@@ -260,7 +259,7 @@
     (binding [ext/*source* :builtin] (ext/register-tool! {:name "execute_form" :handler (fn [_ _] "ok")}))
     (fs/create-dirs (fs/parent f))
     (spit f (str "(ns bba.extensions.u (:require [bba.ext :as ext]))"
-                "(ext/on-unload! (fn [] (println \"UNLOAD-A\")))"))
+                 "(ext/on-unload! (fn [] (println \"UNLOAD-A\")))"))
     (core/load-extensions! ctx)
     (is (= 1 (count (mine))) "one unloader registered for this file")
     ;; a reload runs the unload hook, then drops it with the extension
@@ -281,7 +280,7 @@
         mine (fn [] (filter #(= f (:source %)) (:unloaders @ext/registry)))]
     (fs/create-dirs (fs/parent f))
     (spit f (str "(ns bba.extensions.v (:require [bba.ext :as ext]))"
-                "(ext/on-unload! (fn [] (throw (ex-info \"boom\" {}))))"))
+                 "(ext/on-unload! (fn [] (throw (ex-info \"boom\" {}))))"))
     (core/load-extensions! ctx)
     (let [err (java.io.StringWriter.)]
       (binding [*err* err] (core/load-extensions! ctx))
@@ -431,7 +430,6 @@
         (is (< (- (System/currentTimeMillis) t0) 10000))
         (is (str/includes? r "early"))
         (is (str/includes? r "timed out"))))))
-
 
 ;; ---------------------------------------------------------------- request hooks
 
