@@ -1,4 +1,5 @@
 {:paths ["src" "test"]
+ :deps {de.timokramer/charm.clj {:mvn/version "0.2.123"}}
  :tasks
  {test  {:doc  "Run the bba tests (offline, fake provider)"
          :task (let [_ (require 'clojure.test 'bba-test 'codex-test 'providers-test 'tui-test 'world-test)

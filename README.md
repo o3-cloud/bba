@@ -335,7 +335,7 @@ bb agent       # run bba from source
 | `src/bba/world.clj`, `world_store.clj`, `sys.clj`, `lint.clj` | The world: evaluator, checkpoints, named worlds, revisions, `sys/sh` and the clj-kondo check. |
 | `src/bba/provider.clj`, `openai.clj` | Providers and streaming. |
 | `src/bba/responses.clj`, `codex_auth.clj` | The `codex` provider: Responses API translation and the ChatGPT login. |
-| `src/bba/main.clj`, `tui.clj`, `ui.clj` | Command line, line editor, spinner and colors. |
+| `src/bba/main.clj`, `tui.clj`, `ui.clj` | Command line, the charm.clj line editor, spinner and colors. |
 | `extensions/` | Core extensions: skills, MCP and compaction. |
 | `examples/` | Example extensions and an example `mcp.json`. |
 
@@ -344,3 +344,4 @@ bb agent       # run bba from source
 - [babashka](https://github.com/babashka/babashka) by Michiel Borkent: the runtime.
 - [Jiti](https://github.com/ghuntley/jiti) and ["Growing Lisp applications"](https://ghuntley.com/lisp/) by Geoffrey Huntley: the world, the two tools, checkpoints and revisions.
 - [pi](https://pi.dev/): the small core and the extension model.
+- [charm.clj](https://github.com/timokramer/charm.clj) by Timo Kramer: the terminal UI library behind the interactive line editor.

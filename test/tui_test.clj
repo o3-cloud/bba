@@ -1,9 +1,10 @@
 (ns tui-test
-  "Line editor, layout, streaming folds, session resume and cancel. No terminal needed."
+  "Line editor, charm bridge, streaming folds, session resume and cancel. No terminal needed."
   (:require [babashka.fs :as fs]
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [charm.message :as msg]
             [org.httpkit.server :as server]
             [bba.core :as core]
             [bba.ext :as ext]
@@ -70,16 +71,28 @@
         (is (= h (tui/load-history file)) "multi-line entries survive the file"))
       (finally (fs/delete-tree dir)))))
 
-;; ---------------------------------------------------------------- layout
+(deftest press-to-key-mapping
+  (is (= [:insert "h"] (tui/press->key (msg/key-press "h"))))
+  (is (= :enter (tui/press->key (msg/key-press :enter))))
+  (is (= [:insert " "] (tui/press->key (msg/key-press :space))))
+  (is (= :ctrl-c (tui/press->key (msg/key-press "c" :ctrl true))))
+  (is (= :kill-word (tui/press->key (msg/key-press "w" :ctrl true))))
+  (is (= :home (tui/press->key (msg/key-press "a" :ctrl true))))
+  (is (= :newline (tui/press->key (msg/key-press :enter :alt true))) "Alt+Enter is a new line")
+  (is (nil? (tui/press->key (msg/window-size 80 24))) "non-key messages are ignored")
+  (is (nil? (tui/press->key (msg/key-press :f5))) "unbound keys are ignored"))
 
-(deftest cursor-position-with-wrap-and-newlines
-  (is (= [0 5] (tui/cursor-at "› abc" 80)))
-  (is (= [1 0] (tui/cursor-at "abcd" 4)) "a full row moves the cursor to the next row")
-  (is (= [1 1] (tui/cursor-at "abcde" 4)))
-  (is (= [2 2] (tui/cursor-at "ab\ncd\nxy" 80)))
-  (is (= "› a\n  b" (tui/display "› " "a\nb")))
-  (is (= 7 (tui/display-index "› " "a\nb" 3)) "index after b counts the continuation prefix")
-  (is (= 2 (tui/display-index "› " "" 0)) "empty buffer: cursor after the prompt"))
+(deftest view-shows-prompt-buffer-and-caret
+  (let [v (tui/view-str "› " "› " {:buf "ab" :pos 2})]
+    (is (str/starts-with? v "› "))
+    (is (str/includes? v "ab"))
+    (is (str/includes? v "\u001b[7m") "the caret is reverse video"))
+  (testing "continuation lines get a blank prefix as wide as the plain prompt"
+    (let [v (tui/view-str "› " "› " {:buf "a\nb" :pos 3})]
+      (is (str/includes? v (str "\n" "  " "b")) "two spaces before the continuation")))
+  (testing "a styled prompt must not widen the continuation indent"
+    (let [v (tui/view-str "› " "\u001b[36m› \u001b[0m" {:buf "a\nb" :pos 3})]
+      (is (str/includes? v (str "\n" "  " "b")) "indent counts the plain prompt, not its escapes"))))
 
 ;; ---------------------------------------------------------------- streaming folds
 

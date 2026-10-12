@@ -60,7 +60,7 @@ flowchart TB
     CAUTH[bba.codex-auth - ChatGPT login, read-only]
   end
   subgraph Terminal
-    TUI[bba.tui - line editor, history]
+    TUI[bba.tui - charm.clj line editor, history]
     UIN[bba.ui - colour, spinner, markdown-lite]
   end
   subgraph CoreExtensions
@@ -102,7 +102,7 @@ flowchart TB
 | `src/bba/responses.clj` | 169 | Responses API translation, used by `codex`. |
 | `src/bba/codex_auth.clj` | 66 | Read-only access to the Codex CLI login (`~/.codex/auth.json`) and JWT claim reading. |
 | `src/bba/main.clj` | 286 | `parse-args`, one-turn driver `agent-run`, SIGINT cancellation, built-in commands, `interactive`, `run`, `-main`. |
-| `src/bba/tui.clj` | 189 | Raw-mode line editor: pure `handle-key`, pure screen layout, history file. |
+| `src/bba/tui.clj` | 183 | Charm.clj-backed line editor: pure `press->key` and `handle-key`, pure `view-str` frame, history file. |
 | `src/bba/ui.clj` | 85 | ANSI colours, spinner worker, markdown-lite rendering. |
 | `extensions/skills.clj` | 506 | Agent Skills: discovery, validation, the `activate_skill` tool, `/skills`. |
 | `extensions/mcp.clj` | 351 | MCP servers as tools, JSON-RPC demultiplexing, both protocol eras, `/mcp`. |
@@ -352,12 +352,15 @@ flowchart LR
 
 | ID | Requirement | Source |
 |---|---|---|
-| R-TUI-1 | While stdin and stdout are a terminal and `TERM` is not `dumb`, bba shall use the raw-mode line editor with history. | `tui/tty?`, `main/line-reader` |
+| R-TUI-1 | While stdin and stdout are a terminal and `TERM` is not `dumb`, bba shall read entries with the charm.clj line editor and its history. | `tui/tty?`, `main/line-reader` |
 | R-TUI-1a | If stdin or stdout is not a terminal, or `TERM` is `dumb`, then bba shall read plain lines. | `tui/tty?`, `main/line-reader` |
 | R-TUI-2 | bba shall keep the input history in `$BBA_HOME/history`, one JSON string per line, reading at most the last 500 entries. | `tui/load-history`, `tui/add-history` |
 | R-TUI-3 | bba shall implement, as pure key handling, insert, newline, enter, backspace, delete, left, right, home, end, kill-to-start, kill-to-end, kill-word, up, down, Ctrl-C and Ctrl-D. | `tui/handle-key` |
+| R-TUI-3a | bba shall translate charm.clj key-press messages into that key vocabulary in a pure function, ignoring messages it does not bind. | `tui/press->key` |
 | R-TUI-4 | When Enter is pressed with a trailing backslash, or Alt+Enter is pressed, bba shall insert a newline instead of submitting. | `tui/handle-key` |
-| R-TUI-5 | bba shall compute the cursor position from prompt, buffer and terminal width, wrapping at the width and counting continuation prefixes. | `tui/cursor-at`, `tui/display-index` |
+| R-TUI-5 | bba shall render one frame per charm message as a pure function of the edit state, showing the prompt, the buffer and a reverse-video caret at the cursor. | `tui/view-str` |
+| R-TUI-5a | bba shall indent the continuation of a wrapped or new line by the width of the plain prompt, so styling escapes cannot shift the layout. | `tui/view-str` |
+| R-TUI-5b | bba shall deliver bracketed pastes as one insert, with carriage returns normalised to newlines. | `tui/entry-update` |
 | R-TUI-6 | When Ctrl-D is pressed on an empty buffer, or `/quit` or `/exit` is typed, bba shall exit the session. | `tui/handle-key`, `main/interactive` |
 | R-TUI-6a | When Ctrl-C is pressed on an empty buffer, bba shall clear the line and stay in the session. | `tui/handle-key`, `main/interactive` |
 | R-TUI-7 | bba shall disable colours and the spinner when output is not a terminal or when `NO_COLOR` is set. | `ui/enable!` |
@@ -783,7 +786,7 @@ left unpinned. They are recorded rather than turned into requirements.
 | `R-CLI-*`, `R-LOOP-*`, `R-SESS-*`, `R-EXT-*` | `bba_test.clj`: `ac1-print-mode-with-tool-use`, `ac2-extension-adds-tool`, `ac3-self-improvement-with-reload`, `ac4-hook-blocks-tool-call`, `ac5-broken-extension-does-not-stop-harness`, `ac6-missing-api-key`, `ac8-tool-errors-are-results`, `ac9-entry-point-name`, `max-turns-bound`, `agents-md-in-system-prompt`, `session-file-written-without-key`, `reload-drops-broken-file-registrations`, `unload-hooks-run-on-reload-and-drop-broken-files`, `hook-error-fails-closed-and-override-warns`, `request-hook-transforms-what-is-sent`, `request-hook-failure-is-fail-open`, `request-hook-bad-return-is-ignored`, `parse-args-cases`, `interactive-survives-provider-and-command-errors`, `session-start-event-and-no-extensions-flag`, `new-starts-a-fresh-session` |
 | `R-WORLD-*`, `R-STORE-*`, `R-EVAL-*`, `R-LINT-*` | `world_test.clj`: `s1`-`s10`, `tools-through-the-agent-loop`, `goals-reported-not-enforced`, `execute-must-not-define-or-redefine`, `reader-errors-and-namespace-switches`, `multi-form-develop-is-all-or-nothing`, `lint-rejects-errors-before-evaluation`, `library-aliases-survive-restores`, `lint-warn-and-off`, `removal`, `timeout-restores`, `lock-held-by-live-process`, `startup-falls-back-when-latest-does-not-load`, `develop-side-effects-replay-on-restore`, `gitignore-and-default-adapter`, `adapter-ns-must-not-name-a-harness-namespace`, `restore-property-random-sequences`, `ctrl-c-interrupt-restores`, `old-single-world-moves-to-main`, `create-switch-and-isolate`, `fork-at-a-revision`, `failed-switch-keeps-the-current-world`, `world-names`, `cli-world-flag-and-continue` |
 | `R-PROV-*` | `providers_test.clj`: `messages-to-chat-completions`, `tools-to-functions`, `reply-from-chat-completions`, `check-env-per-provider`, `parse-provider-and-model-flags`, `provider-flag-overrides-env-in-main`, `openai-over-http`, `openrouter-over-http`, `ollama-over-http`, `default-provider-is-ollama-deepseek`, `switch-commands-show-and-validate`, `switch-reaches-the-next-request`, `provider-command-takes-an-optional-model`; `codex_test.clj`: `auth-file-uses-codex-home`, `reading-jwt-claims`, `access-token-from-env-then-from-the-codex-file`, `check-env-for-codex`, `messages-to-responses-input`, `tools-are-flat-not-nested`, `build-request-always-streams`, `folding-a-stream`, `folding-edge-cases`, `codex-over-http`, `from-env-selects-codex`, `codex-runs-a-turn-end-to-end` |
-| `R-TUI-*` | `tui_test.clj`: `typing-and-cursor-moves`, `kill-keys`, `enter-submits-or-continues`, `home-and-end-work-per-line`, `ctrl-c-and-ctrl-d`, `history-up-and-down`, `history-file-round-trip`, `cursor-position-with-wrap-and-newlines`, `openai-chunks-fold-into-a-reply`, `anthropic-events-fold-into-a-message`, `chat-completions-stream-over-http`, `replayable-drops-incomplete-turns`, `continue-flag-resumes-the-latest-session`, `interrupt-stops-a-shell-command` |
+| `R-TUI-*` | `tui_test.clj`: `typing-and-cursor-moves`, `kill-keys`, `enter-submits-or-continues`, `home-and-end-work-per-line`, `ctrl-c-and-ctrl-d`, `history-up-and-down`, `history-file-round-trip`, `press-to-key-mapping`, `view-shows-prompt-buffer-and-caret`, `openai-chunks-fold-into-a-reply`, `anthropic-events-fold-into-a-message`, `chat-completions-stream-over-http`, `replayable-drops-incomplete-turns`, `continue-flag-resumes-the-latest-session`, `interrupt-stops-a-shell-command` |
 | `R-NFR-1`, `R-NFR-2` | `bba_test.clj`: `ac7-core-size`, `nfr4-startup-time` |
 | `R-CEXT-*` | No dedicated test file; exercised indirectly through `activate_skill` in `world_test.clj:246` and through the extension loader tests in `bba_test.clj`. This is the largest untested surface in the repository. |
 
