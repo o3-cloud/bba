@@ -4,15 +4,19 @@
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [charm.components.viewport]
             [charm.message :as msg]
             [org.httpkit.server :as server]
             [bba.core :as core]
             [bba.ext :as ext]
             [bba.main :as main]
+            [bba.md]
+            [bba.toolview :as toolview]
             [bba.openai :as openai]
             [bba.provider :as provider]
             [bba.sys :as sys]
-            [bba.tui :as tui]))
+            [bba.tui :as tui]
+            [bba.ui :as ui]))
 
 (use-fixtures :each (fn [t] (ext/reset-all!) (t) (ext/reset-all!)))
 
@@ -79,6 +83,7 @@
   (is (= :kill-word (tui/press->key (msg/key-press "w" :ctrl true))))
   (is (= :home (tui/press->key (msg/key-press "a" :ctrl true))))
   (is (= :newline (tui/press->key (msg/key-press :enter :alt true))) "Alt+Enter is a new line")
+  (is (= :newline (tui/press->key (msg/key-press "\r" :alt true))) "ESC CR, as charm reads a real Alt+Enter")
   (is (nil? (tui/press->key (msg/window-size 80 24))) "non-key messages are ignored")
   (is (nil? (tui/press->key (msg/key-press :f5))) "unbound keys are ignored"))
 
@@ -94,7 +99,88 @@
     (let [v (tui/view-str "› " "\u001b[36m› \u001b[0m" {:buf "a\nb" :pos 3})]
       (is (str/includes? v (str "\n" "  " "b")) "indent counts the plain prompt, not its escapes"))))
 
+;; ---------------------------------------------------------------- tool view
+
+(deftest tool-calls-show-code
+  (is (= "● execute (project-brief)" (toolview/call-str "execute_form" {:code "(project-brief)"} 80))
+      "one-line code stays on the label line")
+  (is (= "● execute (->> xs (map inc))"
+         (toolview/call-str "execute_form" {:code "(->> xs\n     (map inc))"} 80))
+      "multi-line code is collapsed to one line")
+  (is (= "● read_skill {\"name\":\"deploy\"}" (toolview/call-str "read_skill" {:name "deploy"} 80))))
+
+(deftest tool-results-show-status
+  (is (= "  ⎿ ✓ => 42  2 chars"
+         (toolview/result-str "execute_form" (pr-str {:status :accepted :value "42"}) false 80)))
+  (is (str/starts-with? (toolview/result-str "develop_form" (pr-str {:status :accepted :defined ["f" "g"]}) false 80)
+                        "  ⎿ ✓ defined f g"))
+  (is (= "  ⎿ ✗ IllegalArgumentException: bad"
+         (toolview/result-str "execute_form" (pr-str {:status :error :class "java.lang.IllegalArgumentException"
+                                                      :message "bad"}) true 80))
+      "an error shows the short class name and the message")
+  (is (= "  ⎿ 5 chars" (toolview/result-str "read_skill" "hello" false 80)))
+  (is (= "  ⎿ ✗ rejected (redefined): foo"
+         (toolview/result-str "develop_form" (pr-str {:status :rejected :reason :redefined :vars ["foo"]}) true 80))
+      "a rejected change is a failure, not a ✓")
+  (is (str/starts-with? (toolview/result-str "execute_form" (pr-str {:status :accepted :value (pr-str "a\nb")}) false 80)
+                        "  ⎿ ✓ => a b")
+      "a string value shows its text, not its escapes"))
+
+(deftest a-call-label-links-to-its-detail
+  (try (ui/enable! true)
+       (is (str/includes? (toolview/call-str "execute_form" {:code "(f)"} 80 "file:///tmp/x.md")
+                          "\u001b]8;;file:///tmp/x.md\u001b\\"))
+       (finally (ui/enable! false)))
+  (is (= "● execute (f)" (toolview/call-str "execute_form" {:code "(f)"} 80 "file:///tmp/x.md"))
+      "with colour off there is no link"))
+
+(deftest the-detail-has-the-full-code-and-result
+  (let [d (toolview/detail-md "execute_form" {:code "(->> xs\n     (map inc))"}
+                              (pr-str {:status :accepted :value (pr-str "line one\nline two")}))]
+    (is (str/includes? d "```clojure\n(->> xs\n     (map inc))\n```") "the code keeps its lines")
+    (is (str/includes? d "line one\nline two") "a string value is shown as text")
+    (is (str/includes? d "**Result** (accepted)"))))
+
+(deftest ctrl-o-expands-only-at-an-empty-prompt
+  (is (= :expand (tui/press->key (msg/key-press "o" :ctrl true))))
+  (is (= [:expand] (:done (tui/handle-key (tui/new-state []) :expand))))
+  (is (nil? (:done (tui/handle-key (assoc (tui/new-state []) :buf "x" :pos 1) :expand)))
+      "with text in the line, Ctrl-O does nothing"))
+
+(deftest the-pager-scrolls-and-closes
+  (let [st {:vp (charm.components.viewport/viewport (str/join "\n" (range 50)) :height 5)}
+        [st2 cmd] (tui/pager-update st (msg/key-press :down))]
+    (is (= 1 (get-in st2 [:vp :y-offset])) "down scrolls one line")
+    (is (nil? cmd))
+    (doseq [k [(msg/key-press "q") (msg/key-press :escape) (msg/key-press "o" :ctrl true)]]
+      (is (some? (second (tui/pager-update st k))) (str "closes on " (pr-str (:key k)))))
+    (is (= 9 (get-in (first (tui/pager-update st (msg/window-size 80 10))) [:vp :height]))
+        "a resize leaves one row for the footer")))
+
+(deftest one-line-code-fits-beside-its-label
+  (let [s (toolview/call-str "execute_form" {:code (apply str (repeat 100 "x"))} 40)]
+    (is (= 40 (count s)) "the label and the code fill the width and no more")))
+
+(deftest stream-printer-redraws-a-table-at-its-end
+  (let [out (with-out-str
+              (let [p (#'main/stream-printer {:md (bba.md/context {:width 40 :render true :palette {}})})]
+                ((:text p) "| a | b |\n|---|---|\n| 1 | 2 |\nafter\n")))]
+    (is (str/includes? out "\r\u001b[3A\u001b[J┌") "it moves up over the three raw rows and draws the box")
+    (is (str/ends-with? out "└───┴───┘\nafter\n"))))
+
 ;; ---------------------------------------------------------------- streaming folds
+
+(deftest stream-printer-renders-wrapped-lines
+  (let [out (with-out-str
+              (let [p (#'main/stream-printer {:md (bba.md/context {:width 20 :render true})})]
+                ((:text p) "a **bold** word in a line ")  ; 26 cells: two rows at width 20
+                ((:text p) "that wraps\n")
+                ((:text p) "next")
+                ((:flush p))))]
+    (is (str/includes? out "a **bold** word in a line ") "chunks stream on one line")
+    (is (str/includes? out "\r\u001b[1A\u001b[J") "the redraw moves up over the second raw row")
+    (is (not (str/includes? (subs out (str/index-of out "\u001b[J")) "**")) "the redraw has no ** marks")
+    (is (str/ends-with? out "next\n") "the last line is ended by :flush")))
 
 (deftest openai-chunks-fold-into-a-reply
   (let [seen (atom [])

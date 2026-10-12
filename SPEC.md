@@ -61,7 +61,8 @@ flowchart TB
   end
   subgraph Terminal
     TUI[bba.tui - charm.clj line editor, history]
-    UIN[bba.ui - colour, spinner, markdown-lite]
+    UIN[bba.ui - colour, spinner]
+    MDN[bba.md - markdown to styled rows, wrapping, tables]
   end
   subgraph CoreExtensions
     SKL[extensions/skills.clj]
@@ -82,6 +83,7 @@ flowchart TB
   PROV --> CAUTH
   MAIN --> TUI
   MAIN --> UIN
+  MAIN --> MDN
   SKL --> EXTN
   MCPX --> EXTN
   CMP --> EXTN
@@ -101,16 +103,18 @@ flowchart TB
 | `src/bba/openai.clj` | 91 | Chat Completions translation, used by `openai`, `openrouter` and `ollama`. |
 | `src/bba/responses.clj` | 169 | Responses API translation, used by `codex`. |
 | `src/bba/codex_auth.clj` | 66 | Read-only access to the Codex CLI login (`~/.codex/auth.json`) and JWT claim reading. |
-| `src/bba/main.clj` | 286 | `parse-args`, one-turn driver `agent-run`, SIGINT cancellation, built-in commands, `interactive`, `run`, `-main`. |
+| `src/bba/main.clj` | 299 | `parse-args`, one-turn driver `agent-run`, streaming printer, SIGINT cancellation, built-in commands, `interactive`, `run`, `-main`. |
 | `src/bba/tui.clj` | 183 | Charm.clj-backed line editor: pure `press->key` and `handle-key`, pure `view-str` frame, history file. |
-| `src/bba/ui.clj` | 85 | ANSI colours, spinner worker, markdown-lite rendering. |
+| `src/bba/md.clj` | 453 | Markdown to terminal rows: pure `md-line`/`render`, inline spans, wrapping, fenced panels, tables, `stream-row`. Widths in display cells via charm. |
+| `src/bba/ui.clj` | 71 | ANSI colours and the spinner worker. Every helper is identity when colour is off, so a caller styles unconditionally. |
 | `extensions/skills.clj` | 506 | Agent Skills: discovery, validation, the `activate_skill` tool, `/skills`. |
 | `extensions/mcp.clj` | 351 | MCP servers as tools, JSON-RPC demultiplexing, both protocol eras, `/mcp`. |
 | `extensions/compaction.clj` | 458 | Context-window compaction as a `:request` hook, `/compact`. |
 
-Dependency direction: `main -> core -> ext`, `main -> world -> {world-store, lint, sys, ext, ui}`,
+Dependency direction: `main -> core -> ext`, `main -> world -> {world-store, lint, sys, ext}`,
 `core -> provider -> {openai, responses, codex-auth}`. `world-store`, `openai` and `responses` are pure
 translation layers: their only effects are file writes and HTTP calls performed by their callers.
+`main -> {tui, md, ui}` and `md -> ui`: the terminal layer renders; nothing below it prints.
 
 ## 3. Requirements (EARS)
 
@@ -273,7 +277,9 @@ sequenceDiagram
 | R-LOOP-15 | If a `:tool-call` hook throws, then bba shall block the call with the hook's error as the reason. | `core/blocked-reason` |
 | R-LOOP-16 | bba shall let each `:request` hook replace the outgoing request, once per turn, evaluated against the live context. | `core/apply-request-hooks` |
 | R-LOOP-17 | If a `:request` hook throws or returns a value that is not a request map with a `:messages` vector, then bba shall ignore it, warn, and keep the previous request. | `core/apply-request-hooks` |
-| R-LOOP-18 | bba shall print streamed model text only when a line completes, and redraw a finished line with markdown-lite when it fits on one screen row. | `main/stream-printer` |
+| R-LOOP-18 | bba shall print streamed model text as it arrives, and redraw a finished line with its rendered markdown when that line occupies one screen row. | `main/stream-printer`, `md/stream-row` |
+| R-LOOP-18a | When a streamed line occupies more than one screen row, bba shall leave it as printed, so a redraw cannot scroll the rows above it. | `main/stream-printer` |
+| R-LOOP-18b | bba shall carry the renderer state across streamed lines, so an open fenced block reaches the rows that follow it. | `main/stream-printer` |
 | R-LOOP-19 | When Ctrl-C arrives while the model works, bba shall cancel the turn, print `(cancelled)`, keep the conversation as it was before the user message, and restore any running world attempt. | `main/with-cancel` |
 
 ### 3.6 Sessions (`R-SESS`)
@@ -348,7 +354,7 @@ flowchart LR
 | R-EXT-10 | If an extension replaces a registration from a different source, then bba shall warn which source replaces what. | `ext/put!` |
 | R-EXT-11 | When `:session-start` is emitted, bba shall emit it at session start, on `/new`, and after `/reload`. | `main/run-session`, `main/interactive`, `main/builtin-commands` |
 
-### 3.9 Terminal interface (`R-TUI`)
+### 3.9 Terminal interface (`R-TUI`, `R-MD`)
 
 | ID | Requirement | Source |
 |---|---|---|
@@ -365,9 +371,50 @@ flowchart LR
 | R-TUI-6a | When Ctrl-C is pressed on an empty buffer, bba shall clear the line and stay in the session. | `tui/handle-key`, `main/interactive` |
 | R-TUI-7 | bba shall disable colours and the spinner when output is not a terminal or when `NO_COLOR` is set. | `ui/enable!` |
 | R-TUI-8 | While the model works, bba shall show a spinner labelled `thinking...` or `running <tool>...` with elapsed seconds, and pause it to print progress lines. | `ui/start!`, `ui/log!`, `main/agent-run` |
-| R-TUI-9 | bba shall render markdown-lite on a terminal: headings bold, fenced blocks dim, and inline bold and code styled; plain text otherwise. | `ui/md`, `ui/md-line` |
-| R-TUI-10 | bba shall print one line at start-up naming the world, its namespace, its revision and its function count, and a line naming the provider and model. | `main/run-session`, `main/interactive` |
+| R-TUI-9 | bba shall render model text as markdown on a terminal: headings, bullets, quotes, rules, fenced panels, tables and inline spans become styled rows. | `md/md-line`, `md/render` |
 
+#### 3.9.1 Markdown renderer (`R-MD`)
+
+The renderer is pure. `md-line` maps `[ctx line]` to `[ctx' rows]`, so it can be driven one
+line at a time while text streams; `render` walks a whole document, because table detection
+needs one line of lookahead.
+
+| ID | Requirement | Source |
+|---|---|---|
+| R-MD-1 | bba shall measure every width in display cells through charm, so an escape sequence or a double-width character cannot shift a row, a panel or a column. | `md/width-of` |
+| R-MD-2 | bba shall keep the renderer pure: `md-line` and `render` take a context and text and return data rather than printing. | `md/md-line`, `md/render` |
+| R-MD-3 | bba shall carry renderer state in the context and thread it from one `md-line` call to the next, so a fenced block stays open across lines. | `md/context`, `md/md-line` |
+| R-MD-4 | bba shall map each syntax element to a palette function of the styled text, replaceable as a whole from the context. | `md/default-palette`, `md/context` |
+| R-MD-5 | bba shall keep the markup a palette function adds free of display cells, so a styled row measures as a plain one. | `md/default-palette`, `bba.ui` |
+| R-MD-6 | Where rendering is off, bba shall return every line untouched, so a pipe receives the markdown as it came. | `md/context`, `md/render` |
+| R-MD-7 | bba shall wrap a paragraph to the context width, breaking between words and dropping the space the row was broken at. | `md/wrap-rows`, `md/text-block` |
+| R-MD-8 | When a single word is longer than a row, bba shall cut it at the last display cell that fits, so a long path cannot rely on the terminal's own wrapping. | `md/wrap-rows`, `md/fit` |
+| R-MD-9 | bba shall never split a grapheme when it fits or cuts text. | `md/fit` |
+| R-MD-10 | bba shall choose the inline rule that matches earliest, so a code span wins over the emphasis inside it. | `md/spans`, `md/inline-rules` |
+| R-MD-10a | bba shall recognise code, bold, italic, strikethrough, link and image as inline spans. | `md/inline-rules` |
+| R-MD-11 | bba shall require a boundary around an emphasis marker, so a mid-word asterisk stays literal. | `md/inline-rules` |
+| R-MD-12 | bba shall render a link as its label and add the target only when the two differ. | `md/spans`, `md/piece` |
+| R-MD-13 | Where colour is enabled, bba shall emit a link as an OSC 8 hyperlink. | `md/osc8`, `ui/enabled?` |
+| R-MD-13a | Where colour is off, bba shall emit a link as its bare label. | `md/osc8` |
+| R-MD-14 | bba shall render each heading level as bold, and the first level as bold and underlined, keeping the hash marks as its marker. | `md/md-line`, `md/default-palette` |
+| R-MD-15 | bba shall mark a bullet with a single glyph and an ordered item with its own number. | `md/md-line` |
+| R-MD-15a | bba shall indent a wrapped list continuation past the marker. | `md/hanging` |
+| R-MD-16 | bba shall prefix a quote with a bar and align its continuation under the text. | `md/md-line` |
+| R-MD-17 | bba shall render a thematic break as a rule across the full width. | `md/md-line` |
+| R-MD-18 | While a fence is open, bba shall take each line literally, so a backtick or an asterisk there is a character and not markup. | `md/md-line`, `md/code-row` |
+| R-MD-19 | bba shall render a fenced block as a panel with a labelled opening rule and a closing rule. | `md/fence-open`, `md/fence-close` |
+| R-MD-19a | bba shall mark every body row of a fenced block with a vertical bar. | `md/code-row`, `md/panel` |
+| R-MD-20 | bba shall pad every panel row to the context width, so the panel stays closed however the code wraps. | `md/panel` |
+| R-MD-21 | bba shall omit the delimiter row from the rendered table. | `md/render` |
+| R-MD-21a | bba shall draw a table row as its own bars and cells, with no padding outside the first and last bar. | `md/table` |
+| R-MD-22 | bba shall align each table column as the delimiter row indicates and size it to its widest visible cell. | `md/align-of`, `md/table` |
+| R-MD-23 | bba shall cap a table to the context width, shrinking the widest column until the row fits. | `md/table` |
+| R-MD-24 | bba shall render markdown inside a table cell. | `md/cell` |
+| R-MD-24a | When a table cell is wider than its column, bba shall take it from its plain text, so no escape is left unbalanced. | `md/cell` |
+| R-MD-25 | When a streamed line is unfinished, bba shall return only the rows that are already complete and a flag saying whether anything was held back. | `md/stream-row` |
+| R-MD-26 | While a fence is open, bba shall keep a blank line as a panel row. | `md/md-line` |
+
+### 3.10 Commands (`R-CMD`)
 ### 3.10 Commands (`R-CMD`)
 
 | ID | Requirement | Source |
@@ -786,7 +833,7 @@ left unpinned. They are recorded rather than turned into requirements.
 | `R-CLI-*`, `R-LOOP-*`, `R-SESS-*`, `R-EXT-*` | `bba_test.clj`: `ac1-print-mode-with-tool-use`, `ac2-extension-adds-tool`, `ac3-self-improvement-with-reload`, `ac4-hook-blocks-tool-call`, `ac5-broken-extension-does-not-stop-harness`, `ac6-missing-api-key`, `ac8-tool-errors-are-results`, `ac9-entry-point-name`, `max-turns-bound`, `agents-md-in-system-prompt`, `session-file-written-without-key`, `reload-drops-broken-file-registrations`, `unload-hooks-run-on-reload-and-drop-broken-files`, `hook-error-fails-closed-and-override-warns`, `request-hook-transforms-what-is-sent`, `request-hook-failure-is-fail-open`, `request-hook-bad-return-is-ignored`, `parse-args-cases`, `interactive-survives-provider-and-command-errors`, `session-start-event-and-no-extensions-flag`, `new-starts-a-fresh-session` |
 | `R-WORLD-*`, `R-STORE-*`, `R-EVAL-*`, `R-LINT-*` | `world_test.clj`: `s1`-`s10`, `tools-through-the-agent-loop`, `goals-reported-not-enforced`, `execute-must-not-define-or-redefine`, `reader-errors-and-namespace-switches`, `multi-form-develop-is-all-or-nothing`, `lint-rejects-errors-before-evaluation`, `library-aliases-survive-restores`, `lint-warn-and-off`, `removal`, `timeout-restores`, `lock-held-by-live-process`, `startup-falls-back-when-latest-does-not-load`, `develop-side-effects-replay-on-restore`, `gitignore-and-default-adapter`, `adapter-ns-must-not-name-a-harness-namespace`, `restore-property-random-sequences`, `ctrl-c-interrupt-restores`, `old-single-world-moves-to-main`, `create-switch-and-isolate`, `fork-at-a-revision`, `failed-switch-keeps-the-current-world`, `world-names`, `cli-world-flag-and-continue` |
 | `R-PROV-*` | `providers_test.clj`: `messages-to-chat-completions`, `tools-to-functions`, `reply-from-chat-completions`, `check-env-per-provider`, `parse-provider-and-model-flags`, `provider-flag-overrides-env-in-main`, `openai-over-http`, `openrouter-over-http`, `ollama-over-http`, `default-provider-is-ollama-deepseek`, `switch-commands-show-and-validate`, `switch-reaches-the-next-request`, `provider-command-takes-an-optional-model`; `codex_test.clj`: `auth-file-uses-codex-home`, `reading-jwt-claims`, `access-token-from-env-then-from-the-codex-file`, `check-env-for-codex`, `messages-to-responses-input`, `tools-are-flat-not-nested`, `build-request-always-streams`, `folding-a-stream`, `folding-edge-cases`, `codex-over-http`, `from-env-selects-codex`, `codex-runs-a-turn-end-to-end` |
-| `R-TUI-*` | `tui_test.clj`: `typing-and-cursor-moves`, `kill-keys`, `enter-submits-or-continues`, `home-and-end-work-per-line`, `ctrl-c-and-ctrl-d`, `history-up-and-down`, `history-file-round-trip`, `press-to-key-mapping`, `view-shows-prompt-buffer-and-caret`, `openai-chunks-fold-into-a-reply`, `anthropic-events-fold-into-a-message`, `chat-completions-stream-over-http`, `replayable-drops-incomplete-turns`, `continue-flag-resumes-the-latest-session`, `interrupt-stops-a-shell-command` |
+| `R-MD-*` | `md_test.clj`: `inline-spans-name-their-element`, `a-code-span-wins-over-the-emphasis-inside-it`, `a-link-keeps-its-target`, `emphasis-needs-a-boundary`, `width-counts-cells-not-characters`, `fit-never-splits-a-wide-character`, `wrapping-fills-the-width`, `a-word-longer-than-the-row-is-cut`, `no-row-needs-the-terminals-own-wrap`, `a-row-is-not-widened-by-escape-styling`, `headings`, `bullets-get-a-marker`, `a-wrapped-bullet-stays-inside-its-marker`, `a-nested-bullet-keeps-its-indent`, `quotes-indent-under-a-bar`, `a-rule-spans-the-width`, `a-fenced-block-is-a-panel`, `markup-inside-a-fence-is-left-alone`, `a-fence-with-no-info-string-has-no-label`, `a-long-code-line-wraps-inside-the-panel`, `a-table-is-aligned-and-only-fits-the-width`, `a-header-without-a-delimiter-is-not-a-table`, `a-wide-table-is-capped-to-the-width`, `inline-markup-in-a-table-cell-is-rendered`, `a-line-that-fits-is-complete-and-one-row`, `a-wrapped-line-holds-back-its-partial-row`, `an-open-fence-is-not-complete`, `stream-row-is-pure`, `without-rendering-the-text-is-untouched`, `colour-off-still-removes-the-markup` |
 | `R-NFR-1`, `R-NFR-2` | `bba_test.clj`: `ac7-core-size`, `nfr4-startup-time` |
 | `R-CEXT-*` | No dedicated test file; exercised indirectly through `activate_skill` in `world_test.clj:246` and through the extension loader tests in `bba_test.clj`. This is the largest untested surface in the repository. |
 

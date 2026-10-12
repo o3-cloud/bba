@@ -124,11 +124,11 @@
     (cond
       (or (= t "error") (:error event))
       (throw (ex-info (str "API error: " (or (get-in event [:error :message]) (:message event)
-                                               (:error event) t)) {}))
+                                             (:error event) t)) {}))
 
       (= t "response.failed")
       (throw (ex-info (str "API error: " (or (get-in event [:response :error :message])
-                                               (get-in event [:response :error]) "response failed")) {}))
+                                             (get-in event [:response :error]) "response failed")) {}))
 
       (= t "response.output_text.delta")
       (do (when (and on-text (seq (:delta event))) (on-text (:delta event)))

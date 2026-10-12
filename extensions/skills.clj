@@ -330,23 +330,23 @@
                        (when (:trusted? s)
                          (mapv #(assoc % :scope (:scope s)) (scan-dir s))))
                      (scope-dirs (:project-dir opts)))
-         vrows (mapv (fn [r] (assoc (validate-dir (:dir r)) :scope (:scope r)))
-                     rows)
-         by-name (reduce (fn [acc s]
-                           (let [nm (str (:name s))
-                                 k (if (str/blank? nm) (str "?" (:location s)) nm)
-                                 prev (get (:skills acc) k)]
-                             (cond
-                               (nil? prev) (update acc :skills assoc k s)
+        vrows (mapv (fn [r] (assoc (validate-dir (:dir r)) :scope (:scope r)))
+                    rows)
+        by-name (reduce (fn [acc s]
+                          (let [nm (str (:name s))
+                                k (if (str/blank? nm) (str "?" (:location s)) nm)
+                                prev (get (:skills acc) k)]
+                            (cond
+                              (nil? prev) (update acc :skills assoc k s)
                                ;; an invalid copy never shadows one that loads
-                               (and (:loaded? s) (not (:loaded? prev)))
-                               (update acc :skills assoc k s)
-                               (not (:loaded? s)) acc
-                               :else (update acc :collisions conj
-                                             (str nm ": keeping " (:location prev)
-                                                  ", shadowed " (:location s))))))
-                         {:skills {} :collisions []}
-                         vrows)]
+                              (and (:loaded? s) (not (:loaded? prev)))
+                              (update acc :skills assoc k s)
+                              (not (:loaded? s)) acc
+                              :else (update acc :collisions conj
+                                            (str nm ": keeping " (:location prev)
+                                                 ", shadowed " (:location s))))))
+                        {:skills {} :collisions []}
+                        vrows)]
     {:skills (vec (sort-by #(str (or (:name %) (:dir-name %))) (vals (:skills by-name))))
      :collisions (vec (:collisions by-name))}))
 
@@ -488,19 +488,19 @@
     (empty? (:errors r))))
 
 (ext/register-command! "skills"
-  (fn [args ctx]
-    (let [a (str/trim (str args))]
-      (cond
-        (or (= a "reload") (= a "rescan")) (do (rescan! (:cwd ctx)) (reregister-tool!) (show-summary))
-        (str/starts-with? a "show ") (show-resources (str/trim (subs a 5)))
-        (str/starts-with? a "validate ") (show-validation (subs a 9))
-        (= a "") (show-summary)
-        :else (println "usage: /skills [reload | show NAME | validate PATH]")))))
+                       (fn [args ctx]
+                         (let [a (str/trim (str args))]
+                           (cond
+                             (or (= a "reload") (= a "rescan")) (do (rescan! (:cwd ctx)) (reregister-tool!) (show-summary))
+                             (str/starts-with? a "show ") (show-resources (str/trim (subs a 5)))
+                             (str/starts-with? a "validate ") (show-validation (subs a 9))
+                             (= a "") (show-summary)
+                             :else (println "usage: /skills [reload | show NAME | validate PATH]")))))
 
 (ext/on! :session-start
-  (fn [_payload ctx]
-    (rescan! (:cwd ctx))
-    (reregister-tool!)))
+         (fn [_payload ctx]
+           (rescan! (:cwd ctx))
+           (reregister-tool!)))
 
 (rescan!)
 (reregister-tool!)

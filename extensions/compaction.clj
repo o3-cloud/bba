@@ -435,24 +435,24 @@
     {:request (compact-request cfg ctx request)}))
 
 (ext/on! :session-start
-        (fn [_ ctx] (try (install! ctx) (catch Exception e (ext/warn "compaction install failed: " (ex-message e))))))
+         (fn [_ ctx] (try (install! ctx) (catch Exception e (ext/warn "compaction install failed: " (ex-message e))))))
 
 (ext/on! :request handle-request)
 
 (defn- set-cfg! [f & args] (swap! state update :cfg (fn [c] (apply f (or c defaults) args))))
 
 (ext/register-command! "compact"
-  (fn [args _ctx]
-    (let [[sub & more] (remove str/blank? (str/split (str (or args "")) #"\s+"))]
-      (case (or sub "status")
-        "status" (println (status-text))
-        "on" (do (set-cfg! assoc :enabled? true) (println (status-text)))
-        "off" (do (set-cfg! assoc :enabled? false) (println (status-text)))
-        "model" (if (seq more)
-                   (do (set-cfg! assoc :summarizer
-                                 (assoc (get-in @state [:cfg :summarizer] (:summarizer defaults))
-                                        :provider (first more) :model (second more)))
-                       (println (status-text)))
-                   (println (str "usage: /compact model PROVIDER [MODEL]  (currently "
-                                 (or (get-in @state [:cfg :summarizer :provider]) "(session provider)") ")")))
-        (println "usage: /compact [status|on|off|model PROVIDER [MODEL]]")))))
+                       (fn [args _ctx]
+                         (let [[sub & more] (remove str/blank? (str/split (str (or args "")) #"\s+"))]
+                           (case (or sub "status")
+                             "status" (println (status-text))
+                             "on" (do (set-cfg! assoc :enabled? true) (println (status-text)))
+                             "off" (do (set-cfg! assoc :enabled? false) (println (status-text)))
+                             "model" (if (seq more)
+                                       (do (set-cfg! assoc :summarizer
+                                                     (assoc (get-in @state [:cfg :summarizer] (:summarizer defaults))
+                                                            :provider (first more) :model (second more)))
+                                           (println (status-text)))
+                                       (println (str "usage: /compact model PROVIDER [MODEL]  (currently "
+                                                     (or (get-in @state [:cfg :summarizer :provider]) "(session provider)") ")")))
+                             (println "usage: /compact [status|on|off|model PROVIDER [MODEL]]")))))

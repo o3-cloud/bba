@@ -169,7 +169,7 @@ NOTE: An invariant about a function that you have not built yet shows a warning 
 | Ctrl-C | While the model works: stop the turn, stop any running command and restore the world. At the prompt: clear the line. |
 | Ctrl-D, `/quit` | Leave. |
 
-Answers stream as the model writes them. When a line is complete, bba shows it with simple markdown formatting. A spinner shows `thinking...` or `running <tool>...`.
+Answers stream as the model writes them. A finished line is redrawn as rendered markdown: headings, lists, quotes, rules, tables and fenced code panels, wrapped to the terminal width. A spinner shows `thinking...` or `running <tool>...`.
 
 ## Options
 
@@ -335,7 +335,7 @@ bb agent       # run bba from source
 | `src/bba/world.clj`, `world_store.clj`, `sys.clj`, `lint.clj` | The world: evaluator, checkpoints, named worlds, revisions, `sys/sh` and the clj-kondo check. |
 | `src/bba/provider.clj`, `openai.clj` | Providers and streaming. |
 | `src/bba/responses.clj`, `codex_auth.clj` | The `codex` provider: Responses API translation and the ChatGPT login. |
-| `src/bba/main.clj`, `tui.clj`, `ui.clj` | Command line, the charm.clj line editor, spinner and colors. |
+| `src/bba/main.clj`, `tui.clj`, `ui.clj`, `md.clj` | Command line, the charm.clj line editor, colors and spinner, and the markdown renderer. |
 | `extensions/` | Core extensions: skills, MCP and compaction. |
 | `examples/` | Example extensions and an example `mcp.json`. |
 

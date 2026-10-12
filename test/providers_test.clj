@@ -28,7 +28,7 @@
          (openai/->messages "sys" conversation)))
   (testing "string content, no system, assistant with only a tool call"
     (is (= [{:role "user" :content "x"}
-            {:role "assistant" :content nil
+            {:role "assistant" :content ""
              :tool_calls [{:id "a" :type "function" :function {:name "read" :arguments "{}"}}]}]
            (openai/->messages "" [{:role "user" :content "x"}
                                   {:role "assistant" :content [{:type "tool_use" :id "a" :name "read"}]}])))))

@@ -6,6 +6,7 @@
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.string :as str]
+            [charm.components.viewport :as vp]
             [charm.message :as msg]
             [charm.program :as program]
             [charm.style.core :as style]))
@@ -28,6 +29,10 @@
 (defn width []
   (let [w (some-> (stty "size") (str/split #" ") second parse-long)]
     (if (and w (pos? w)) w 80)))  ; a pty with no size set reports 0
+
+(defn height []
+  (let [h (some-> (stty "size") (str/split #" ") first parse-long)]
+    (if (and h (pos? h)) h 24)))
 
 ;; ---------------------------------------------------------------- history
 
@@ -91,6 +96,7 @@
       :kill-word  (delete-range st (word-start buf pos) pos)
       :up         (history-move st -1)
       :down       (history-move st 1)
+      :expand     (if (str/blank? buf) (assoc st :done [:expand]) st)  ; only at an empty prompt
       :ctrl-c     (if (str/blank? buf) (assoc st :done [:cancel]) (assoc st :buf "" :pos 0))
       :ctrl-d     (cond (= "" buf) (assoc st :done [:eof])
                         (< pos (count buf)) (delete-range st pos (inc pos))
@@ -124,7 +130,9 @@
         (and c (= c "f")) :right
         (and c (= c "p")) :up
         (and c (= c "n")) :down
-        (and (:alt m) (contains? #{:enter} k)) :newline
+        (and c (= c "o")) :expand
+        ;; a real Alt+Enter is ESC CR, which charm reports as the rune "\r" with :alt
+        (and (:alt m) (contains? #{:enter "\r" "\n"} k)) :newline
         (keyword? k) (get named-keys k)
         (string? k) [:insert k]
         :else nil))))
@@ -173,11 +181,52 @@
                           :update entry-update
                           :view (partial view-str plain shown)
                           :ctrl-c :message
-                          :bracketed-paste true})]
+                          :bracketed-paste true
+                          ;; pinned: the background query runs at every prompt, and
+                          ;; it eats keys typed before the prompt shows
+                          :dark-background? true})]
     (println) (flush)
     (let [[kind text] (:done res)]
       (case kind
         :submit (do (swap! hist add-history history-file text) text)
         :eof nil
         :cancel :cancel
+        :expand :expand
         nil))))
+
+;; ---------------------------------------------------------------- pager
+
+(def ^:private close-keys ["q" "esc" "ctrl+o" "enter" "ctrl+c"])
+
+(defn- pager-footer [vp]
+  (let [n (vp/viewport-line-count vp) h (:height vp)
+        pct (if (<= n h) 100 (int (* 100 (vp/viewport-scroll-percent vp))))]
+    (style/render (style/style :faint true)
+                  (str " q or Ctrl-O closes · ↑ ↓ PgUp PgDn g G scroll · " pct "%"))))
+
+(defn pager-update
+  "Pure: one charm message -> [pager-state cmd]. A resize sizes the viewport to the
+  screen less the footer row; a close key quits; anything else scrolls."
+  [{:keys [vp] :as st} m]
+  (cond
+    (msg/window-size? m)
+    [(assoc st :vp (vp/viewport-set-dimensions vp (:width m) (max 1 (dec (:height m))))) nil]
+
+    (some #(msg/key-match? m %) close-keys) [st program/quit-cmd]
+
+    :else (let [[vp' _] (vp/viewport-update vp m)] [(assoc st :vp vp') nil])))
+
+(defn pager-view [{:keys [vp]}] (str (vp/viewport-view vp) "\n" (pager-footer vp)))
+
+(defn page!
+  "Show `content` full screen on the alternate screen until a close key, then put
+  the screen back as it was, so the conversation reappears untouched."
+  [content]
+  (program/run {:init {:vp (vp/viewport content :height (max 1 (dec (height))))}
+                :update pager-update
+                :view pager-view
+                :alt-screen true
+                :overflow :bottom
+                :ctrl-c :message
+                :dark-background? true})
+  nil)

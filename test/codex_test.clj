@@ -26,7 +26,7 @@
 (defn- good-claims [exp]
   {"exp" exp
    "https://api.openai.com/auth" {"chatgpt_account_id" "acct-1"
-                                   "chatgpt_plan_type" "plus"}})
+                                  "chatgpt_plan_type" "plus"}})
 
 (defn- live-token [] (jwt (good-claims (+ now 3600))))
 
@@ -58,7 +58,7 @@
       (is (= "from-file" (codex-auth/access-token {"CODEX_HOME" (str dir "/.codex")})))
       (testing "the env var wins over the file"
         (is (= "from-env" (codex-auth/access-token {"CODEX_HOME" (str dir "/.codex")
-                                                      "CODEX_ACCESS_TOKEN" "from-env"}))))
+                                                    "CODEX_ACCESS_TOKEN" "from-env"}))))
       (finally (fs/delete-tree dir))))
   (testing "no file at all"
     (is (nil? (codex-auth/access-token {"CODEX_HOME" "/nonexistent-codex-home"})))))
@@ -82,7 +82,7 @@
 (def conversation
   [{:role "user" :content [{:type "text" :text "say hi"}]}
    {:role "assistant" :content [{:type "text" :text "ok"}
-                                  {:type "tool_use" :id "t1" :name "bash" :input {:command "echo hi"}}]}
+                                {:type "tool_use" :id "t1" :name "bash" :input {:command "echo hi"}}]}
    {:role "user" :content [{:type "tool_result" :tool_use_id "t1" :content "hi\n"}]}])
 
 (deftest messages-to-responses-input
@@ -167,17 +167,17 @@
                                        :arguments "{oops"}}]))))))
   (testing "a missing call_id gets a generated one"
     (is (= "call_0" (-> (responses/reply-of-stream
-                           (reduce #(responses/chunk-step %1 %2 nil) responses/stream-init
-                                   [{:type "response.output_item.done" :output_index 0
-                                     :item {:type "function_call" :name "b" :arguments "{}"}}]))
-                          :content first :id))))
+                         (reduce #(responses/chunk-step %1 %2 nil) responses/stream-init
+                                 [{:type "response.output_item.done" :output_index 0
+                                   :item {:type "function_call" :name "b" :arguments "{}"}}]))
+                        :content first :id))))
   (testing "a text-only turn ends the turn"
     (is (= "end_turn" (:stop_reason (responses/reply-of-stream
-                                       (reduce #(responses/chunk-step %1 %2 nil) responses/stream-init
-                                               [{:type "response.output_text.delta" :delta "done"}]))))))
+                                     (reduce #(responses/chunk-step %1 %2 nil) responses/stream-init
+                                             [{:type "response.output_text.delta" :delta "done"}]))))))
   (testing "unknown events are ignored"
     (is (= responses/stream-init (responses/chunk-step responses/stream-init
-                                                         {:type "response.in_progress"} nil))))
+                                                       {:type "response.in_progress"} nil))))
   (testing "an incomplete stream with no answer throws instead of returning nothing"
     (let [acc (reduce #(responses/chunk-step %1 %2 nil) responses/stream-init
                       [{:type "response.created"}
@@ -211,8 +211,8 @@
                                       {:type "error" :error {:message "rate limited"}} nil)
                 (catch Exception e (ex-message e)))))
     (is (str/starts-with? (try (responses/chunk-step responses/stream-init
-                                                       {:type "response.failed"
-                                                        :response {:error {:message "boom"}}} nil)
+                                                     {:type "response.failed"
+                                                      :response {:error {:message "boom"}}} nil)
                                (catch Exception e (ex-message e)))
                           "API error: boom"))))
 
@@ -277,7 +277,7 @@
   (testing "streamed text reaches the answer"
     (let [[r] (with-server 200 (sse [{:type "response.output_text.delta" :delta "Hel"}
                                      {:type "response.output_text.delta" :delta "lo"}])
-                                    (fn [base] (codex-call {"CODEX_ACCESS_TOKEN" (live-token)} base)))]
+                (fn [base] (codex-call {"CODEX_ACCESS_TOKEN" (live-token)} base)))]
       (is (= [{:type "text" :text "Hello"}] (:content r)))))
   (testing "an HTTP error becomes 'API error <status>: <msg>'"
     (let [[e] (with-server 401 "{\"detail\":\"Invalid token\"}"
