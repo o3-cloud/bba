@@ -1,6 +1,6 @@
 # bba — Software Requirements Specification (EARS)
 
-| |
+| Field | Value |
 |---|---|
 | **System name in this document** | `bba` |
 | **Artifact** | reverse-engineered specification of the `bba` repository |
