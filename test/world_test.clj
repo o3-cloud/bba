@@ -180,8 +180,9 @@
         (is (= [1 2 3 4] (revs cwd)))))))
 
 (deftest s8-manual-commands-without-key
+  ;; The default provider needs no key; pin anthropic, whose missing key is the case here.
   (let [cwd (temp-cwd)
-        {:keys [code out err]} (run-bba cwd ["--world"]
+        {:keys [code out err]} (run-bba cwd ["--world" "--provider" "anthropic"]
                                         :input (str "/develop " rev-src "\n/execute (reverse-string \"xy\")\n/status\n"))]
     (is (= 0 code))
     (is (str/includes? err "ANTHROPIC_API_KEY is not set; manual /commands only"))
@@ -191,7 +192,7 @@
     (is (= [1 2] (revs cwd))))
   (testing "-p --world without a key still exits 1"
     (let [cwd (temp-cwd)]
-      (is (= 1 (:code (run-bba cwd ["--world" "-p" "hi"]))))))
+      (is (= 1 (:code (run-bba cwd ["--world" "--provider" "anthropic" "-p" "hi"]))))))
   (testing "the world is the only mode: no flag needed, manual commands still work"
     (let [cwd (temp-cwd)
           {:keys [code out]} (run-bba cwd [] :input (str "/develop " rev-src "\n/execute (reverse-string \"ab\")\n"))]

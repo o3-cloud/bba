@@ -7,7 +7,8 @@
             [bba.ext :as ext]
             [bba.main :as main]
             [bba.provider :as provider]
-            [bba.sys :as sys]))
+            [bba.sys :as sys]
+            [org.httpkit.server]))
 
 (def root (str (fs/parent (fs/parent (fs/absolutize *file*)))))
 
@@ -147,11 +148,13 @@
     (is (= "fine" (str/trim out)))))
 
 (deftest ac6-missing-api-key
-  (testing "in-process: no provider installed, no key"
+  ;; The default provider (ollama) needs no key, so these pin anthropic to exercise the gate.
+  (testing "in-process: no provider installed, anthropic selected, no key"
     (let [dirs (temp-dirs)
           err (java.io.StringWriter.)
           code (binding [*err* err *out* (java.io.StringWriter.)]
-                 (main/run {:args ["-p" "hi"] :cwd (do (fs/create-dirs (:cwd dirs)) (:cwd dirs))
+                 (main/run {:args ["--provider" "anthropic" "-p" "hi"]
+                            :cwd (do (fs/create-dirs (:cwd dirs)) (:cwd dirs))
                             :env {"BBA_HOME" (:home dirs)} :in nil}))]
       (is (= 1 code))
       (is (str/includes? (str err) "ANTHROPIC_API_KEY is not set"))
@@ -161,7 +164,7 @@
           _ (fs/create-dirs (:cwd dirs))
           env (-> (into {} (System/getenv)) (dissoc "ANTHROPIC_API_KEY") (assoc "BBA_HOME" (:home dirs)))
           r @(p/process {:dir (:cwd dirs) :out :string :err :string :extra-env {} :env env}
-                        bb-bin (str (fs/path root "bin" "bba")) "-p" "hi")]
+                        bb-bin (str (fs/path root "bin" "bba")) "--provider" "anthropic" "-p" "hi")]
       (is (= 1 (:exit r)))
       (is (str/includes? (:err r) "ANTHROPIC_API_KEY is not set")))))
 

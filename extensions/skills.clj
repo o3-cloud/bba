@@ -420,10 +420,6 @@
            "skill resolve against its skill directory (returned by the call)." NL NL
            (catalog s)))))
 
-(defn- loaded-names
-  []
-  (mapv :name (filterv :loaded? (:disc @state))))
-
 (defn- tool-description
   "activate_skill description with the live catalog embedded (tier 1)."
   []
@@ -492,10 +488,10 @@
     (empty? (:errors r))))
 
 (ext/register-command! "skills"
-  (fn [args _ctx]
+  (fn [args ctx]
     (let [a (str/trim (str args))]
       (cond
-        (or (= a "reload") (= a "rescan")) (do (rescan! (:cwd _ctx)) (reregister-tool!) (show-summary))
+        (or (= a "reload") (= a "rescan")) (do (rescan! (:cwd ctx)) (reregister-tool!) (show-summary))
         (str/starts-with? a "show ") (show-resources (str/trim (subs a 5)))
         (str/starts-with? a "validate ") (show-validation (subs a 9))
         (= a "") (show-summary)

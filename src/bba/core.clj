@@ -135,10 +135,12 @@
 
 ;; ---------------------------------------------------------------- hooks
 
-(defn- request-reason
-  "Run :request hooks over the outgoing request. Each may return {:request req'}
-  to replace it. A hook that throws or returns something that is not a map with a
-  :messages vector is ignored (fail-open: the previous request is kept)."
+(defn apply-request-hooks
+  "Let extensions transform the request that goes to the provider. Called once per
+  turn, so a hook sees the live ctx (for example a provider switch).
+  Each :request hook may return {:request req'} to replace it. A hook that throws
+  or returns something that is not a map with a :messages vector is ignored
+  (fail-open: the previous request is kept)."
   [req ctx]
   (reduce (fn [r {:keys [handler source]}]
             (try (let [out (handler {:request r} ctx)]
@@ -150,12 +152,6 @@
                    (ext/warn "request hook in " source " failed: " (ex-message e))
                    r)))
           req (ext/hooks :request)))
-
-(defn apply-request-hooks
-  "Let extensions transform the request that goes to the provider. Called once per
-  turn, so a hook sees the live ctx (for example a provider switch)."
-  [req ctx]
-  (if-let [hs (seq (ext/hooks :request))] (request-reason req ctx) req))
 
 ;; ---------------------------------------------------------------- loop
 

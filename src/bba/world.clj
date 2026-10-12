@@ -450,7 +450,7 @@
     (.addShutdownHook (Runtime/getRuntime) (Thread. #(store/unlock! dir pid)))
     (doseq [t (store/delete-tmp! dir)] (ext/warn "deleted leftover temp file " t))
     (reset! state {:dir dir :cwd cwd :name name :adapter adapter :ns-name (:ns adapter) :pid pid
-                   :snapshot {:log []} :timeouts 0})
+                   :temporary? (:temporary? adapter) :snapshot {:log []} :timeouts 0})
     (load-from-disk! dir)
     (let [w (wns) checks {:invariants (run-checks w (:invariants adapter)) :goals (run-checks w (:goals adapter))}]
       (swap! state assoc :checks checks)
@@ -479,7 +479,9 @@
 (defn stop!
   "Release the lock (the namespace stays loaded)."
   []
-  (when-let [{:keys [dir pid]} @state] (store/unlock! dir pid)))
+  (when-let [{:keys [dir pid temporary?]} @state]
+    (store/unlock! dir pid)
+    (when temporary? (store/delete-world! dir)))
 
 (defn current-name [] (:name @state))
 
@@ -505,6 +507,8 @@
        (not (store/valid-name? name)) {:error (str "bad world name " (pr-str name) ": use lowercase letters, digits and single hyphens")}
        (store/exists? cwd name) {:error (str "world " name " already exists")}
        (nil? from-rev) (do (store/ensure-dir! (store/world-dir cwd name)) {:ok (store/world-dir cwd name)})
+       (= :temporary from-rev) (try {:ok (store/temporary-fork! cwd cur)}
+                                    (catch clojure.lang.ExceptionInfo e {:error (ex-message e)}))
        :else (try {:ok (store/fork! dir (store/world-dir cwd name) (if (= :current from-rev) (or rev 0) from-rev) cur)}
                   (catch clojure.lang.ExceptionInfo e {:error (ex-message e)}))))))
 
@@ -520,7 +524,7 @@
 
 ;; ---------------------------------------------------------------- /world
 
-(def world-usage "usage: /world [NAME | new NAME | fork NAME [REV]]")
+(def world-usage "usage: /world [NAME | new NAME | fork NAME [REV] | temp]")
 
 (defn- list-worlds []
   (let [{:keys [cwd] cur :name} @state]
@@ -543,6 +547,15 @@
       (= "new" a) (if (and b (nil? c))
                     (created (create! b) (str "created world " b "; switch with /world " b))
                     (println world-usage))
+      (= "temp" a) (let [r (create! (store/temporary-name) :temporary)]
+                    (if (:error r)
+                      (println (ui/red (:error r)))
+                      (let [i (:ok r) switched (switch! (:name i))]
+                        (if (:error switched)
+                          (println (ui/red (:error switched)))
+                          (println (ui/green (str "switched to temporary fork from " (:source i) " r" (:rev i)
+                                                  "; it will be destroyed when the session ends"))))))
+                    nil)
       (= "fork" a) (let [rev (if c (parse-long c) :current)]
                      (if (and b rev)
                        (created (create! b rev) (str "forked " (current-name) " r" (if (= :current rev) (:rev @state) rev)
@@ -554,4 +567,4 @@
                 (println (ui/red (:error r)))
                 (let [i (:ok r)]
                   (println (ui/green (str "world: " (:name i) ", revision " (:rev i) ", " (:functions i) " functions")))
-                  i))))))
+                  i)))))))

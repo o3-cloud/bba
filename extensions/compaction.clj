@@ -69,9 +69,11 @@
 (defn config
   "User config merged with project config, over the defaults."
   [ctx]
-  (merge defaults
-         (read-edn (fs/path (:home ctx) "compaction.edn"))
-         (read-edn (fs/path (:cwd ctx) ".bba" "compaction.edn"))))
+  (let [cfgs [defaults
+              (read-edn (fs/path (:home ctx) "compaction.edn"))
+              (read-edn (fs/path (:cwd ctx) ".bba" "compaction.edn"))]]
+    ;; :summarizer is nested: merge it too, so {:summarizer {:model "x"}} keeps the other defaults
+    (assoc (apply merge cfgs) :summarizer (apply merge (map :summarizer cfgs)))))
 
 ;; ------------------------------------------------------------ messages (pure)
 
@@ -213,17 +215,17 @@
 (defn call-summarizer-text
   "Call the summarizer with a system prompt and one user text. Returns its text."
   [cfg ctx system text]
-  (let [{:keys [timeout-s]} (:summarizer cfg)
+  (let [timeout-s (or (get-in cfg [:summarizer :timeout-s]) 60)
         fut (future ((summarizer-provider cfg ctx)
                      {:messages [{:role "user" :content [{:type "text" :text text}]}]
-                      :system system}))]
-    (let [r (deref fut (* 1000 (or timeout-s 60)) ::timeout)]
-      (if (= ::timeout r)
-        (do (future-cancel fut)
-            (throw (ex-info (str "summarizer timed out after " timeout-s " s") {})))
-        (->> (blocks r)
-             (keep #(when (= "text" (:type %)) (:text %)))
-             (str/join "\n"))))))
+                      :system system}))
+        r (deref fut (* 1000 timeout-s) ::timeout)]
+    (if (= ::timeout r)
+      (do (future-cancel fut)
+          (throw (ex-info (str "summarizer timed out after " timeout-s " s") {})))
+      (->> (blocks r)
+           (keep #(when (= "text" (:type %)) (:text %)))
+           (str/join "\n")))))
 
 (defn- call-summarizer [cfg ctx middle]
   (call-summarizer-text cfg ctx (summarizer-system) (render-middle middle)))
@@ -265,24 +267,13 @@
 ;; each time the window fills, which is why it gets more expensive as it goes.
 
 (defn fold-system []
-  (str "You maintain a rolling summary of a coding agent's conversation.
-"
-       "You get the current summary and the next piece of transcript.
-"
-       "Return the updated summary only, no preamble. Merge the new facts in.
-"
-       "Use these sections, and omit a section that would be empty:
-"
-       "## Task
-## Decisions
-## Files touched
-## Code written
-"
-       "## Failures and dead ends
-## Open threads
-"
-       "Drop detail that is no longer useful. Keep names, paths, commands and values.
-"
+  (str "You maintain a rolling summary of a coding agent's conversation.\n"
+       "You get the current summary and the next piece of transcript.\n"
+       "Return the updated summary only, no preamble. Merge the new facts in.\n"
+       "Use these sections, and omit a section that would be empty:\n"
+       "## Task\n## Decisions\n## Files touched\n## Code written\n"
+       "## Failures and dead ends\n## Open threads\n"
+       "Drop detail that is no longer useful. Keep names, paths, commands and values.\n"
        "Never invent. If the new transcript adds nothing, return the summary unchanged."))
 
 (defn fold-key [model prev body]
@@ -291,12 +282,8 @@
 (defn fold-content [prev body]
   (str (if (str/blank? (str prev))
          "Current summary: (none yet)"
-         (str "Current summary:
-" (brief (str prev))))
-       "
-
-New transcript to merge:
-" (clip-str body fold-max-chars)))
+         (str "Current summary:\n" (brief (str prev))))
+       "\n\nNew transcript to merge:\n" (clip-str body fold-max-chars)))
 
 (defn fold-summary
   "Fold `new-middle` into `prev`. One summarizer call; cached by content."
@@ -400,23 +387,23 @@ New transcript to merge:
       (continuous-view cfg ctx req)
       (let [msgs (:messages req)
             p (plan msgs {:keep-turns (:keep-turns cfg) :target-tokens (:threshold-tokens cfg)})]
-      (if-not (and (:needed? p) (> (:before-tokens p) (:threshold-tokens cfg)))
-        req
-        (try
-          (let [summary (summarize cfg ctx (:middle p))]
-            (if (str/blank? (str summary))
-              (do (ext/warn "compaction: empty summary; sending full history") req)
-              (let [out (assoc req :messages (compacted p summary))]
-                (swap! state assoc :last {:at (str (java.time.Instant/now))
-                                          :before-tokens (:before-tokens p)
-                                          :after-tokens (estimate-tokens (:messages out))
-                                          :dropped (:middle-count p)
-                                          :keep (:keep p)})
-                (swap! state update :calls inc)
-                out)))
-          (catch Exception e
-            (ext/warn "compaction failed, sending full history: " (ex-message e))
-            req)))))))
+        (if-not (and (:needed? p) (> (:before-tokens p) (:threshold-tokens cfg)))
+          req
+          (try
+            (let [summary (summarize cfg ctx (:middle p))]
+              (if (str/blank? (str summary))
+                (do (ext/warn "compaction: empty summary; sending full history") req)
+                (let [out (assoc req :messages (compacted p summary))]
+                  (swap! state assoc :last {:at (str (java.time.Instant/now))
+                                            :before-tokens (:before-tokens p)
+                                            :after-tokens (estimate-tokens (:messages out))
+                                            :dropped (:middle-count p)
+                                            :keep (:keep p)})
+                  (swap! state update :calls inc)
+                  out)))
+            (catch Exception e
+              (ext/warn "compaction failed, sending full history: " (ex-message e))
+              req)))))))
 
 (defn install!
   "Load the config and mark the hook ready. Called at :session-start. Runs again
@@ -436,9 +423,10 @@ New transcript to merge:
          "\n  summarizer: " (or (get-in cfg [:summarizer :provider]) "(session provider)")
          " / " (or (get-in cfg [:summarizer :model]) "(session model)")
          "\n  compactions this session: " calls
-         (when last (str "\n  last: " (:before-tokens last) " -> " (:after-tokens last)
-                         " tokens, dropped " (:dropped last) " messages, kept " (:keep last)
-                         " turns")))))
+         (when last (str "\n  last: " (:before-tokens last) " -> " (:after-tokens last) " tokens, "
+                         (if (:folded last)
+                           (str (:folded last) " messages folded into the summary")
+                           (str "dropped " (:dropped last) " messages, kept " (:keep last) " turns")))))))
 
 (defn handle-request
   "A :request hook. Reads the live ctx, so it sees the current provider and env."
@@ -454,8 +442,8 @@ New transcript to merge:
 (defn- set-cfg! [f & args] (swap! state update :cfg (fn [c] (apply f (or c defaults) args))))
 
 (ext/register-command! "compact"
-  (fn [args ctx]
-    (let [[sub & more] (str/split (str/trim (or args "")) #"\s+")]
+  (fn [args _ctx]
+    (let [[sub & more] (remove str/blank? (str/split (str (or args "")) #"\s+"))]
       (case (or sub "status")
         "status" (println (status-text))
         "on" (do (set-cfg! assoc :enabled? true) (println (status-text)))

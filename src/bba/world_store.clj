@@ -1,5 +1,5 @@
 (ns bba.world-store
-  "The world store on disk (.bba/world/): adapter, immutable revisions, the CURRENT
+  "The world store on disk (.bba/worlds/<name>/): adapter, immutable revisions, the CURRENT
   pointer, an advisory lock and the ops log. Pure file I/O; no evaluation here."
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
@@ -9,7 +9,7 @@
             [bba.ext :as ext]))
 
 (def default-adapter
-  {:ns 'world :invariants [] :goals [] :timeout-ms 30000 :max-result-chars 4000 :lint :reject})
+  {:ns 'world :invariants [] :goals [] :timeout-ms 3600000 :max-result-chars 4000 :lint :reject})
 
 (def adapter-template
   (str ";; bba world adapter. Read as EDN data; the forms below are evaluated in the world namespace.\n"
@@ -17,7 +17,7 @@
        ";; :goals are reported as met / unmet and never reject a change.\n"
        ";; Example: {:name \"reverse works\" :form (= \"cba\" (reverse-string \"abc\"))}\n"
        ";; :lint runs clj-kondo on each form first: :reject (errors reject), :warn (report only) or :off.\n"
-       "{:ns world\n :invariants []\n :goals []\n :timeout-ms 30000\n :max-result-chars 4000\n :lint :reject}\n"))
+       "{:ns world\n :invariants []\n :goals []\n :timeout-ms 3600000\n :max-result-chars 4000\n :lint :reject}\n"))
 
 ;; ---------------------------------------------------------------- worlds
 
@@ -200,6 +200,30 @@
                           :forked-from {:world from-name :rev n} :rollback-of nil
                           :log (mapv #(if (:rev %) (assoc % :rev 1) %) (:log src)))))
     to))
+
+(defn temporary-name []
+  (str "tmp-" (subs (str (random-uuid)) 0 12)))
+
+(defn temporary-fork!
+  "Fork source world at its atomic CURRENT revision without acquiring the source lock.
+  Marks the new world disposable and returns {:name :dir :source :rev}."
+  [cwd source]
+  (let [from (world-dir cwd source)
+        name (temporary-name)
+        to (world-dir cwd name)]
+    (when-not (exists? cwd source)
+      (throw (ex-info (str "no source world " source) {})))
+    (let [rev (or (current from) 0)]
+      (fork! from to rev source)
+      (let [a (read-adapter to)]
+        (spit (f to "world.edn") (pr-str (assoc a :temporary? true :source-world source :source-revision rev))))
+      {:name name :dir to :source source :rev rev})))
+
+(defn delete-world!
+  "Delete a world directory recursively. The caller must have stopped its evaluator."
+  [dir]
+  (when (fs/exists? dir) (fs/delete-tree dir))
+  true)
 
 ;; ---------------------------------------------------------------- ops log
 

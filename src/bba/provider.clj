@@ -1,5 +1,5 @@
 (ns bba.provider
-  "Built-in providers: Anthropic (default), OpenAI, OpenRouter, Ollama and Codex, which
+  "Built-in providers: Ollama (default), Anthropic, OpenAI, OpenRouter and Codex, which
   uses a ChatGPT subscription. Pick one with BBA_PROVIDER."
   (:require [babashka.http-client :as http]
             [cheshire.core :as json]
@@ -10,23 +10,28 @@
             [bba.responses :as responses]))
 
 (def api-url "https://api.anthropic.com/v1/messages")
-(def default-model "claude-opus-5-5")
+(def default-provider "ollama")
+(def default-model "deepseek-v4.1-flash:cloud")
+;; The Anthropic API keeps its own default: it is the one provider whose model is not
+;; the out-of-the-box choice.
+(def anthropic-model "claude-opus-5-5")
 
 (def providers
   "name -> {:key env var that must be set, :model default, :url default base, :url-env override,
-  :path appended to the base}. All but anthropic use the Chat Completions API."
-  {"anthropic"  {:key "ANTHROPIC_API_KEY" :model default-model}
+  :path appended to the base, :api :responses for the Responses API}. openai, openrouter and
+  ollama use the Chat Completions API; codex uses the Responses API."
+  {"anthropic"  {:key "ANTHROPIC_API_KEY" :model anthropic-model}
    "openai"     {:key "OPENAI_API_KEY" :model "gpt-5" :url "https://api.openai.com/v1" :url-env "OPENAI_BASE_URL"
                  :path "/chat/completions"}
    "openrouter" {:key "OPENROUTER_API_KEY" :model "anthropic/claude-opus-5.5" :url "https://openrouter.ai/api/v1"
                  :url-env "OPENROUTER_BASE_URL" :path "/chat/completions"}
-   "ollama"     {:model "gpt-oss" :url "http://localhost:11434" :url-env "OLLAMA_HOST" :path "/v1/chat/completions"}
+   "ollama"     {:model default-model :url "http://localhost:11434" :url-env "OLLAMA_HOST" :path "/v1/chat/completions"}
    ;; Codex uses a ChatGPT subscription, not a key: no :key, and bba reads the
    ;; Codex CLI login. Its endpoint speaks the Responses API, not Chat Completions.
    "codex"      {:model "gpt-5.6-luna" :url "https://chatgpt.com/backend-api/codex"
                  :url-env "CODEX_BASE_URL" :api :responses}})
 
-(defn provider-name [env] (str/lower-case (or (not-empty (get env "BBA_PROVIDER")) "anthropic")))
+(defn provider-name [env] (str/lower-case (or (not-empty (get env "BBA_PROVIDER")) default-provider)))
 
 (defn check-env
   "nil when the selected provider can run, else an error message."
@@ -46,7 +51,7 @@
                    "then try again. bba reads " (codex-auth/auth-file env)
                    ", or set CODEX_ACCESS_TOKEN")
               (codex-auth/expired? t)
-              (str "the ChatGPT subscription token expired: run `codex login` to renew it"))))))
+              "the ChatGPT subscription token expired: run `codex login` to renew it")))))
 
 (defn build-request
   "Pure: the HTTP request for one Messages API call."
@@ -55,7 +60,7 @@
    :headers {"x-api-key" api-key
              "anthropic-version" "2023-06-01"
              "content-type" "application/json"}
-   :body (cond-> {:model (or model default-model)
+   :body (cond-> {:model (or model anthropic-model)
                   :max_tokens (or max-tokens 8192)
                   :system system
                   :messages messages}
@@ -161,11 +166,6 @@
                           (openai/stream-body (post-stream http-req #(openai/chunk-step %1 %2 on-text) openai/stream-init))
                           (post-json http-req)))))))
 
-(defn account-id
-  "The ChatGPT account id that goes with the Codex token, when the token names one."
-  [token]
-  (codex-auth/account-id token))
-
 (defn codex
   "Return a provider fn for the Codex endpoint, authenticated by the ChatGPT
   subscription that the Codex CLI signed in with. The endpoint always streams, so
@@ -175,7 +175,7 @@
     (fn [{:keys [on-text] :as req}]
       (let [http-req (responses/build-request req {:url (base-url env "codex")
                                                    :access-token token
-                                                   :account-id (account-id token)
+                                                   :account-id (codex-auth/account-id token)
                                                    :model (model env "codex")})]
         (responses/reply-of-stream
          (post-stream http-req #(responses/chunk-step %1 %2 on-text) responses/stream-init))))))

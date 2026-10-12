@@ -10,8 +10,8 @@
             [bba.world :as world]
             [bba.world-store :as store]))
 
-(def usage (str "usage: bba [-p PROMPT] [-c] [--world NAME] [--provider anthropic|openai|openrouter|ollama|codex] [--model NAME]"
-                " [--max-turns N] [--no-extensions]"))
+(def usage (str "usage: bba [-p PROMPT] [-c] [--world NAME] [--provider ollama|anthropic|openai|openrouter|codex] [--model NAME]"
+                " [--max-turns N] [--no-extensions] [--temporary]  (defaults: provider ollama, model deepseek-v4.1-flash:cloud)"))
 
 (defn parse-args [args]
   (loop [[a & more] args opts {}]
@@ -28,6 +28,8 @@
                                  (assoc opts :error (str a " needs a value")))
       ("-c" "--continue") (recur more (assoc opts :continue true))
       "--no-extensions" (recur more (assoc opts :no-extensions true))
+      "--temporary" (recur more (assoc opts :temporary true))
+      "--temp" (recur more (assoc opts :temporary true))
       "--world" (if (and (some? (first more)) (not (str/starts-with? (first more) "-")))
                   (recur (rest more) (assoc opts :world (first more)))
                   ;; before named worlds --world was a mode flag with no value: accept it, ignore it
@@ -144,7 +146,7 @@
               (println (str "reloaded: " (count (ext/tools)) " tools, "
                             (count (ext/commands)) " commands"))
               ctx)
-   "provider" (fn [ctx args] (switch-provider ctx args))
+   "provider" switch-provider
    "model" switch-model
    "world" (fn [ctx args]  ; a switch tells the model with the next message
              (if-let [i (world/world-command args)]
@@ -157,12 +159,13 @@
   "Run a /command. Returns the ctx to use next."
   [ctx line]
   (let [[_ name args] (re-matches #"/(\S+)\s*(.*)" line)
-        builtin (get (builtin-commands) name)]
+        builtin (get (builtin-commands) name)
+        command (ext/command name)]
     (cond
       builtin (builtin ctx (str/trim args))
-      (ext/command name) (do (try ((:handler (ext/command name)) args ctx)
-                                  (catch Exception e (ext/warn "command /" name " failed: " (ex-message e))))
-                             ctx)
+      command (do (try ((:handler command) args ctx)
+                       (catch Exception e (ext/warn "command /" name " failed: " (ex-message e))))
+                  ctx)
       :else (do (println (ui/red (str "unknown command: /" name " (try /help)"))) ctx))))
 
 ;; ---------------------------------------------------------------- interactive
@@ -256,12 +259,16 @@
             from-session (when-let [w (some-> old core/session-world)]
                            (if (store/exists? cwd w) w
                                (do (ext/warn "the session's world " w " is gone; using the last active world") nil)))
+            temp-source (or (:world opts) from-session (store/active cwd) store/default-world)
+            temp (when (:temporary opts)
+                   (try (store/temporary-fork! cwd temp-source)
+                        (catch Exception e (ext/warn (or (ex-message e) "temporary fork failed")) nil)))
             ctx {:cwd cwd :home home :env env
                  :max-turns (or max-turns (some-> (get env "BBA_MAX_TURNS") parse-long))
                  :print (when-not prompt println)
                  :tty? (boolean tty?)
                  :stream? (boolean (and tty? (not prompt)))}
-            world (try {:info (world/start! (assoc ctx :world (or (:world opts) from-session)))}
+            world (try {:info (world/start! (assoc ctx :world (or (some-> temp :name) (:world opts) from-session)))}
                        (catch clojure.lang.ExceptionInfo e {:error (ex-message e)}))]
         (if (:error world)
           (do (ext/warn (:error world)) 1)

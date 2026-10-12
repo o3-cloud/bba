@@ -5,11 +5,9 @@
   names servers. It launches the commands you configure, so point it only at trusted servers.
 
   Config: ~/.bba/mcp.json (always) and <cwd>/.bba/mcp.json (only when trusted:
-  BBA_MCP_TRUST=1 or a .bba/mcp.trusted file in the project). The file is JSON, and
-  both shapes work:
-
-    keys are strings: mcpServers -> server name -> command and args.
-    Example: npx -y @modelcontextprotocol/server-everything stdio
+  BBA_MCP_TRUST=1 or a .bba/mcp.trusted file in the project). The file is a JSON
+  object, either with an mcpServers key or without one: server name -> command,
+  args and optional cwd. See examples/mcp.json.
 
   Each MCP tool becomes mcp__<server>__<tool>, with the MCP inputSchema passed
   through as the bba input-schema. Servers start with the session, stop after ten
@@ -145,9 +143,9 @@
     (try
       (send! srv {:jsonrpc "2.0" :id id :method method :params params})
       (let [r (deref p ms ::timeout)]
-        (when (= ::timeout r) (swap! (:pending srv) dissoc id))
         (if (= ::timeout r)
-          {:error {:message (str method " timed out after " ms " ms")}}
+          (do (swap! (:pending srv) dissoc id)
+              {:error {:message (str method " timed out after " ms " ms")}})
           r))
       (catch Exception e
         (swap! (:pending srv) dissoc id)
@@ -324,7 +322,7 @@
                                     (or (:description t) (:title t) (:name t)))
                   :input-schema (or (:inputSchema t) {:type "object" :properties {}})
                   :handler (tool-handler sname (:name t))}))
-              (ext/warn (str "mcp: " sname ": " (count (:tool-defs v)) " tools active"))))))))
+              (ext/warn "mcp: " sname ": " (count (:tool-defs v)) " tools active")))))))
 
 (defn- status-lines [ctx]
   (let [{:keys [config status]} @state]
@@ -340,10 +338,9 @@
           (try (register-all! ctx)
                (catch Exception e (ext/warn "mcp: setup failed: " (ex-message e))))))
 
-;; On /reload the kernel drops extension registrations. The fresh load defines a
-;; new stop-all! and calls it here, which first runs the unloaders of the old load.
-(when-let [f (resolve 'bba.ext/on-unload!)]
-  (f stop-all!))
+;; On /reload (and with --no-extensions) the kernel drops extension registrations
+;; and runs their unloaders first, so the servers this load started are stopped.
+(ext/on-unload! stop-all!)
 
 (ext/register-command! "mcp"
   (fn [args ctx]

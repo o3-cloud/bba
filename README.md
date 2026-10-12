@@ -28,10 +28,19 @@ The command is `bba`, so it does not hide the babashka `bb` command.
    ln -s "$PWD/bba/bin/bba" ~/.local/bin/bba
    ```
 
-3. Set a key for one provider. OpenRouter gives you many models with one key:
+3. The default provider is Ollama and needs no key. Start a server and the default
+   model is fetched on first use:
+
+   ```bash
+   ollama serve
+   ```
+
+   To use a hosted model instead, set a key for one provider. OpenRouter gives you
+   many models with one key:
 
    ```bash
    export OPENROUTER_API_KEY=...
+   bba --provider openrouter
    ```
 
    If you already use the Codex CLI, you can skip the key and bill a ChatGPT
@@ -41,7 +50,7 @@ The command is `bba`, so it does not hide the babashka `bb` command.
 
    ```bash
    cd my-project
-   bba --provider openrouter
+   bba
    ```
 
 5. Ask for something:
@@ -65,13 +74,18 @@ Each folder starts with one world, `main`. You can make more, and each world has
 › /world new scratch     # make an empty world
 › /world fork try-2      # copy the open world at its current revision (or: /world fork try-2 5)
 › /world try-2           # switch; the model is told which functions it has now
+› /world temp            # switch to a throwaway fork of the open world
 ```
+
+A temporary world is named `tmp-<id>`. bba deletes it when the session ends. To start in one, use `bba --temporary` (or `--temp`). It forks the world you name with `--world`, or else the world you used last.
 
 To start in a given world, use `bba --world NAME`. `bba -c` continues a session in the world that it used. If a folder has an old single world in `.bba/world/`, bba moves it to `.bba/worlds/main/` at start.
 
 ## Try it without a model
 
-You do not need an API key to use the world. Without a key, bba starts with the manual commands only:
+The world works without any model at all. Every `/command` runs the world directly, so you
+can build and test with no provider in the loop. This is also what you get when the
+provider is unreachable, for example when no Ollama server is running:
 
 ```
 › /develop (defn reverse-string "Reverse s." [s] (apply str (reverse s)))
@@ -134,7 +148,7 @@ NOTE: An invariant about a function that you have not built yet shows a warning 
 | `/execute CODE` | Run code and keep the result. |
 | `/preview CODE` | Run code, show the result and keep nothing. |
 | `/rollback N` | Make a new revision with the state of revision N. History stays. |
-| `/world [NAME \| new NAME \| fork NAME [REV]]` | List, switch, create or fork worlds. See [Worlds](#worlds). |
+| `/world [NAME \| new NAME \| fork NAME [REV] \| temp]` | List, switch, create or fork worlds, or open a temporary fork. See [Worlds](#worlds). |
 | `/functions`, `/describe NAME` | List the functions, or show one with its arguments, docstring and source. |
 | `/history`, `/status` | Show the revisions, or the state of the world and its checks. |
 | `/provider [NAME [MODEL]]`, `/model [NAME]` | Show or change the provider, with an optional model. The conversation stays. |
@@ -164,6 +178,7 @@ bba                                  # interactive session
 bba -p "question"                    # print mode: print the answer and exit (0 = success)
 bba -c                               # continue the last session in this folder
 bba --world scratch                  # open the world named scratch
+bba --temporary                      # work in a throwaway fork; deleted at exit
 bba --provider ollama --model qwen3.5:0.8b
 bba --max-turns 20                   # stop after 20 model calls in one turn (default 200)
 bba --no-extensions                  # load only the core extensions
@@ -182,20 +197,21 @@ If stdin is a pipe, bba reads plain lines and prints only whole answers, so you 
 | `CODEX_HOME`, `CODEX_ACCESS_TOKEN`, `CODEX_BASE_URL` | Where the `codex` provider finds its subscription login, and its endpoint. See [Codex](#codex-use-a-chatgpt-subscription-instead-of-an-api-key). |
 | `NO_COLOR` | Plain output with no colors. |
 | `BBA_DEBUG=1` | Show stack traces. |
+| `BBA_DEBUG_REQUEST` | Write the JSON body of each provider request to this file, overwriting it each call. For diagnosing a request the provider rejects. |
 
 ## Providers
 
 | `--provider` | Key | Default model |
 |---|---|---|
-| `anthropic` (default) | `ANTHROPIC_API_KEY` | `claude-opus-5-5` |
+| `ollama` (default) | none | `deepseek-v4.1-flash:cloud` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-5-5` |
 | `openrouter` | `OPENROUTER_API_KEY` | `anthropic/claude-opus-5.5` |
 | `openai` | `OPENAI_API_KEY` | `gpt-5` |
-| `ollama` | none | `gpt-oss` |
 | `codex` | none (`codex login`) | `gpt-5.6-luna` |
 
-To use another server with the OpenAI Chat Completions API, set `OPENAI_BASE_URL`. To use a remote Ollama server, set `OLLAMA_HOST`.
+To use another server with the OpenAI Chat Completions API, set `OPENAI_BASE_URL`. `OPENROUTER_BASE_URL` changes the OpenRouter endpoint. To use a remote Ollama server, set `OLLAMA_HOST`.
 
-Tested live: OpenRouter and Codex, with the world tools. Ollama was tested live before the world became the only mode. Anthropic and OpenAI are tested only against a local fake server.
+Tested live: Ollama (the default), OpenRouter and Codex, with the world tools. The Ollama default needs no key but it does need a running Ollama server: `ollama serve`, and the model is reached by tag, so it is fetched on first use. Anthropic and OpenAI are tested only against a local fake server.
 
 ### Codex: use a ChatGPT subscription instead of an API key
 
@@ -212,7 +228,7 @@ What to know:
 
 - **It reads, it never writes.** bba does not refresh the token, because refreshing rotates a single-use refresh token and would sign the Codex CLI out. When the token expires (about three days), run `codex login` again and restart bba.
 - **The endpoint always streams, and it speaks the Responses API,** not Chat Completions. `bba.responses` translates between the two.
-- **A reply that runs out of room is an error, not an empty answer.** The endpoint spends part of the reply budget thinking, so a hard question can come back with nothing but `incomplete: max_output_tokens`. bba says so rather than printing a blank line as if it had finished.
+- **An empty reply is an error, not a blank answer.** The endpoint spends part of the reply budget thinking, so a turn can end with no text and no tool call — because it ran out of room (`incomplete: max_output_tokens`) or spent the whole turn reasoning. bba reports it rather than printing a blank line and leaving an empty turn in the session, as if it had finished.
 - **Model names differ from the API.** Use the names the Codex CLI uses (`gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-6-astra`); a metered-API name such as `gpt-5` is refused with \"not supported when using Codex with a ChatGPT account\". `bba --provider codex` shows the default.
 - **`CODEX_BASE_URL` and `CODEX_ACCESS_TOKEN`** override the endpoint and the token (for a proxy, or for CI).
 - This endpoint is not a published API and the plan's rate limits apply. Treat it as convenient, not contractual.
@@ -281,6 +297,7 @@ bba also adds `AGENTS.md` from `~/.bba/` and from your project to the model's in
 |---|---|---|
 | `.bba/worlds/<name>/world.edn` | The settings, invariants and goals of one world. | Yes, if you add it. |
 | `.bba/worlds/<name>/revisions/`, `CURRENT`, `ops.jsonl`, `LOCK` | The saved world and the attempt log. | No. bba adds a `.gitignore`. |
+| `.bba/worlds/tmp-<id>/` | A temporary world. bba deletes it when the session ends. | No. |
 | `.bba/worlds/ACTIVE` | The name of the world that you used last. | — |
 | `.bba/sessions/` | One log file for each session, and the compaction cache. | No. bba adds a `.gitignore`. |
 | `~/.bba/history` | Your input history. | — |

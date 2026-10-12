@@ -8,7 +8,9 @@
   "The file being loaded, or :builtin for core registrations."
   :builtin)
 
-(defonce registry (atom {:tools {} :commands {} :hooks {} :provider nil :unloaders []}))
+(def ^:private empty-registry {:tools {} :commands {} :hooks {} :provider nil :unloaders []})
+
+(defonce registry (atom empty-registry))
 
 (defn warn
   "Print a `bba:` warning on stderr."
@@ -98,4 +100,4 @@
 (defn reset-all!
   "Empty the registry (used by tests)."
   []
-  (reset! registry {:tools {} :commands {} :hooks {} :provider nil}))
+  (reset! registry empty-registry))
