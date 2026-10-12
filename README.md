@@ -126,7 +126,7 @@ Put checks in `.bba/worlds/<name>/world.edn` (`.bba/worlds/main/world.edn` for t
 {:ns world
  :invariants [{:name "reverse works" :form (= "cba" (reverse-string "abc"))}]
  :goals      [{:name "has shout" :form (ifn? shout)}]
- :timeout-ms 30000
+ :timeout-ms 3600000   ; one hour; this is the default a fresh world gets
  :max-result-chars 4000
  :lint :reject}   ; or :warn (report only) or :off
 ```
@@ -148,6 +148,7 @@ NOTE: An invariant about a function that you have not built yet shows a warning 
 | `/execute CODE` | Run code and keep the result. |
 | `/preview CODE` | Run code, show the result and keep nothing. |
 | `/rollback N` | Make a new revision with the state of revision N. History stays. |
+| `/abort` | Report that there is nothing to abort. Ctrl-C stops a running operation. |
 | `/world [NAME \| new NAME \| fork NAME [REV] \| temp]` | List, switch, create or fork worlds, or open a temporary fork. See [Worlds](#worlds). |
 | `/functions`, `/describe NAME` | List the functions, or show one with its arguments, docstring and source. |
 | `/history`, `/status` | Show the revisions, or the state of the world and its checks. |
@@ -166,6 +167,7 @@ NOTE: An invariant about a function that you have not built yet shows a warning 
 | ↑ ↓ | Go through your history. bba saves it in `~/.bba/history`. |
 | ← → Home End, Ctrl-A, Ctrl-E | Move the cursor. |
 | Ctrl-W, Ctrl-U, Ctrl-K | Delete a word, to the start of the line, or to the end of the line. |
+| Ctrl-O | At an empty prompt: show the full code and result of each tool call in the last turn, in a full-screen pager. Press q, Esc or Ctrl-O to close it. |
 | Ctrl-C | While the model works: stop the turn, stop any running command and restore the world. At the prompt: clear the line. |
 | Ctrl-D, `/quit` | Leave. |
 
@@ -317,7 +319,7 @@ WARNING: bba has no sandbox. Code in the world runs with your user rights. It ca
 - **No restarts.** Clojure has no condition/restart system like Common Lisp. When an attempt fails, bba restores the checkpoint, and the model fixes the code in a new attempt.
 - **Effects outside the world stay.** If a failed attempt wrote a file or ran a command, that file or command stays done.
 - **Restores replay code.** bba rebuilds the world from the saved source. Keep `develop_form` code to definitions, and put side effects in `execute_form`.
-- **30-second timeout.** The world stops an attempt after `:timeout-ms` (30 s by default). For long builds or tests, raise `:timeout-ms` in `world.edn`.
+- **One-hour timeout.** The world stops an attempt after `:timeout-ms`. A fresh world gets 3600000 (one hour); the example above sets 30000 (30 s). For long builds or tests, set `:timeout-ms` in `world.edn`.
 - **Runaway loops.** A timeout cannot stop a busy loop that does not wait. That thread uses CPU until you quit bba. `/status` counts these threads.
 - **One bba for each folder.** A lock stops a second bba in the same folder.
 
@@ -325,9 +327,18 @@ WARNING: bba has no sandbox. Code in the world runs with your user rights. It ca
 
 ```bash
 cd bba
-bb test        # all tests, offline, with a fake provider
-bb agent       # run bba from source
+make test      # all tests, offline, with a fake provider
+make verify    # lint, format check, and check ucii.json against the Makefile
+make fmt       # format the Clojure sources
+make agent     # run bba from source (PROMPT="..." answers once and exits)
+make describe  # print the operations as JSON
 ```
+
+Make is the single entry point for these operations. It follows the
+[Universal CI Interface](https://github.com/stackable-specs/ucii) (UCII v0.1, level 2).
+`ucii.json` lists each operation with its parameters and side effects. `make verify`
+fails when `ucii.json` and the `Makefile` disagree. Call the Make targets, not the
+`bb` tasks behind them, so people, agents and CI run the same commands.
 
 | File | Part |
 |---|---|
@@ -335,7 +346,7 @@ bb agent       # run bba from source
 | `src/bba/world.clj`, `world_store.clj`, `sys.clj`, `lint.clj` | The world: evaluator, checkpoints, named worlds, revisions, `sys/sh` and the clj-kondo check. |
 | `src/bba/provider.clj`, `openai.clj` | Providers and streaming. |
 | `src/bba/responses.clj`, `codex_auth.clj` | The `codex` provider: Responses API translation and the ChatGPT login. |
-| `src/bba/main.clj`, `tui.clj`, `ui.clj`, `md.clj` | Command line, the charm.clj line editor, colors and spinner, and the markdown renderer. |
+| `src/bba/main.clj`, `tui.clj`, `ui.clj`, `md.clj`, `toolview.clj` | Command line, the charm.clj line editor, colors and spinner, the markdown renderer, and the Ctrl-O pager view of tool calls. |
 | `extensions/` | Core extensions: skills, MCP and compaction. |
 | `examples/` | Example extensions and an example `mcp.json`. |
 

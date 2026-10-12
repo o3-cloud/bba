@@ -1,0 +1,58 @@
+{
+  "spec": "ucii/v0.1",
+  "project": "bba",
+  "level": 2,
+  "engine": {
+    "name": "make",
+    "invoke": "make <operation> [NAME=value ...]"
+  },
+  "operations": {
+    "describe": {
+      "description": "Print this UCII manifest: the operations, parameters and effects of the project.",
+      "standard": true,
+      "required": false,
+      "invoke": "make describe",
+      "effects": "read-only",
+      "idempotent": true
+    },
+    "test": {
+      "description": "Run the offline test suite against a fake provider. Needs no API key and no network.",
+      "standard": true,
+      "required": false,
+      "invoke": "make test",
+      "effects": "local",
+      "idempotent": true
+    },
+    "verify": {
+      "description": "Run clj-kondo, the cljfmt check, splint and carve over src, test, extensions and ci, then check that this manifest matches the Makefile. Changes no project files.",
+      "standard": true,
+      "required": false,
+      "invoke": "make verify",
+      "effects": "read-only",
+      "idempotent": true
+    },
+    "fmt": {
+      "description": "Rewrite src, test, extensions and ci with cljfmt. Changes files in the working tree.",
+      "standard": false,
+      "required": false,
+      "invoke": "make fmt",
+      "effects": "local",
+      "idempotent": true
+    },
+    "agent": {
+      "description": "Run bba from source in the current folder. With a prompt it answers once and exits; without one it opens the interactive session. Calls the configured model provider.",
+      "standard": false,
+      "required": false,
+      "invoke": "make agent",
+      "effects": "external",
+      "idempotent": false,
+      "parameters": {
+        "prompt": {
+          "type": "string",
+          "required": false,
+          "maps": "PROMPT=<value>"
+        }
+      }
+    }
+  }
+}
