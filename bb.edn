@@ -1,13 +1,13 @@
-{:paths ["src" "test"]
+{:paths ["src" "test" "ci"]
  :deps {de.timokramer/charm.clj {:mvn/version "0.2.123"}}
  :tasks
  {test  {:doc  "Run the bba tests (offline, fake provider)"
-         :task (let [tests '[bba-test codex-test md-test providers-test tui-test world-test]
+         :task (let [tests '[bba-test codex-test md-test providers-test tui-test ucii-check-test world-test]
                      _ (apply require 'clojure.test tests)
                      {:keys [fail error]} (apply (resolve 'clojure.test/run-tests) tests)]
                  (when (pos? (+ fail error)) (System/exit 1)))}
-  lint  {:doc  "clj-kondo, cljfmt check, splint and carve over src, test and extensions"
-         :task (let [dirs ["src" "test" "extensions"]
+  lint  {:doc  "clj-kondo, cljfmt check, splint and carve over src, test, extensions and ci"
+         :task (let [dirs ["src" "test" "extensions" "ci"]
                      ok? (fn [r] (zero? (:exit r)))
                      kondo (< (:exit (apply shell {:continue true} "clj-kondo" "--fail-level" "error" "--lint" dirs)) 2)
                      fmt (ok? (apply shell {:continue true} "cljfmt" "check" dirs))
@@ -17,9 +17,11 @@
                      carve (ok? (shell {:continue true} "bb" "clojure" "-Sdeps"
                                        "{:deps {io.github.borkdude/carve {:git/url \"https://github.com/borkdude/carve\" :git/sha \"fdd1d0bc432f63db69e3a72167ef5e46f10dfba7\"}}}"
                                        "-M" "-m" "carve.main" "--opts"
-                                       (pr-str {:paths dirs :report {:format :text} :api-namespaces (quote [bba.ext bba.main bba.ui])})))]
+                                       (pr-str {:paths dirs :report {:format :text} :api-namespaces (quote [bba.ext bba.main bba.ui ucii-check])})))]
                  (when-not (and kondo fmt carve) (System/exit 1)))}
-  fmt   {:doc  "Format src, test and extensions with cljfmt"
-         :task (shell "cljfmt" "fix" "src" "test" "extensions")}
+  fmt   {:doc  "Format src, test, extensions and ci with cljfmt"
+         :task (shell "cljfmt" "fix" "src" "test" "extensions" "ci")}
+  ucii-check {:doc  "Check that ucii.json matches the Makefile (UCII v0.1)"
+              :task (apply (requiring-resolve (quote ucii-check/-main)) *command-line-args*)}
   agent {:doc  "Run the agent: bb agent [-p PROMPT]"
          :task (apply (requiring-resolve 'bba.main/-main) *command-line-args*)}}}
