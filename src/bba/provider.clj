@@ -112,7 +112,7 @@
 
 (defn anthropic-step
   "Pure except `on-text`: fold one Messages API stream event into {:message .. :blocks {index block}}."
-  [acc {:keys [type index content_block delta message error]} on-text]
+  [acc {:keys [type index content_block delta message error usage]} on-text]
   (case type
     "message_start" (assoc acc :message (dissoc message :content))
     "content_block_start" (assoc-in acc [:blocks index]
@@ -122,7 +122,7 @@
                                              (update-in acc [:blocks index :text] str (:text delta)))
                             "input_json_delta" (update-in acc [:blocks index :json] str (:partial_json delta))
                             acc)
-    "message_delta" (update acc :message merge delta)
+    "message_delta" (update acc :message #(cond-> (merge % delta) usage (update :usage merge usage)))
     "error" (throw (ex-info (str "API error: " (:message error)) {}))
     acc))
 
@@ -187,23 +187,48 @@
          (filter #(and (string? %) (not (str/blank? %))))
          distinct vec)))
 
+(defn anthropic-usage
+  "Pure: a Messages API usage map -> {:input :output}, counting cached input as input."
+  [{:keys [input_tokens output_tokens cache_creation_input_tokens cache_read_input_tokens]}]
+  (when (or input_tokens output_tokens)
+    {:input (+ (or input_tokens 0) (or cache_creation_input_tokens 0) (or cache_read_input_tokens 0))
+     :output (or output_tokens 0)}))
+
+(defn usage-cost
+  "The cost of `usage` in US dollars: the provider's own figure when it sent one,
+  else from BBA_PRICE, \"INPUT,OUTPUT\" dollars per million tokens. nil when unknown."
+  [env {:keys [input output cost]}]
+  (or cost
+      (when-let [[i o] (some->> (not-empty (get env "BBA_PRICE"))
+                                (re-matches #"\s*([0-9.]+)\s*,\s*([0-9.]+)\s*")
+                                rest (map parse-double))]
+        (when (and i o) (/ (+ (* i (or input 0)) (* o (or output 0))) 1e6)))))
+
+(defn add-usage
+  "Pure: the sum of two usage maps; either may be nil."
+  [a b]
+  (if (and a b) (merge-with + a b) (or a b)))
+
 (defn anthropic
   "Return a provider fn for the Anthropic API, configured from `env`."
   [env]
   (fn [{:keys [on-text] :as req}]
-    (let [http-req (build-request req {:api-key (get env "ANTHROPIC_API_KEY") :model (get env "BBA_MODEL")})]
-      (if on-text
-        (anthropic-message (post-stream http-req #(anthropic-step %1 %2 on-text) {:blocks (sorted-map)}))
-        (post-json http-req)))))
+    (let [http-req (build-request req {:api-key (get env "ANTHROPIC_API_KEY") :model (get env "BBA_MODEL")})
+          msg (if on-text
+                (anthropic-message (post-stream http-req #(anthropic-step %1 %2 on-text) {:blocks (sorted-map)}))
+                (post-json http-req))]
+      (assoc msg :usage (anthropic-usage (:usage msg))))))
 
 (defn chat-completions
   "Return a provider fn for provider `n` (openai, openrouter or ollama), configured from `env`."
   [n env]
   (let [{:keys [key path]} (providers n)]
     (fn [{:keys [on-text] :as req}]
-      (let [http-req (openai/build-request req {:url (str (base-url env n) path)
-                                                :api-key (when key (get env key))
-                                                :model (model env n)})]
+      (let [http-req (cond-> (openai/build-request req {:url (str (base-url env n) path)
+                                                        :api-key (when key (get env key))
+                                                        :model (model env n)})
+                       ;; a stream sends its token counts only when asked
+                       on-text (assoc-in [:body :stream_options] {:include_usage true}))]
         (openai/->reply (if on-text
                           (openai/stream-body (post-stream http-req #(openai/chunk-step %1 %2 on-text) openai/stream-init))
                           (post-json http-req)))))))

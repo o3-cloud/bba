@@ -97,7 +97,25 @@
       (is (str/includes? v (str "\n" "  " "b")) "two spaces before the continuation")))
   (testing "a styled prompt must not widen the continuation indent"
     (let [v (tui/view-str "› " "\u001b[36m› \u001b[0m" {:buf "a\nb" :pos 3})]
-      (is (str/includes? v (str "\n" "  " "b")) "indent counts the plain prompt, not its escapes"))))
+      (is (str/includes? v (str "\n" "  " "b")) "indent counts the plain prompt, not its escapes")))
+  (testing "a sent entry stays in the transcript in bold, with no caret"
+    (let [v (tui/view-str "› " "› " {:buf "a\nb" :pos 3 :done [:submit "a\nb"]})]
+      (is (not (str/includes? v "\u001b[7m")) "no caret")
+      (is (= "› a\n  b" (str/replace v #"\u001b\[[0-9;]*m" "")) "the text and indent are kept")))
+  (testing "a cancelled entry has no caret and no bold"
+    (is (= "› ab" (tui/view-str "› " "› " {:buf "ab" :pos 1 :done [:cancel]})))))
+
+(deftest turn-rule-closes-a-turn
+  (is (= "── 2 tools · 3s ────" (toolview/turn-rule {:tools 2 :millis 3400} 20)) "the rule fills the width")
+  (is (= "── 1 tool · 0s " (toolview/turn-rule {:tools 1 :millis 100} 5)) "one tool, and no line when the label is wider")
+  (is (= "── 12s ──" (toolview/turn-rule {:tools 0 :millis 12000} 9)) "no tool count without calls")
+  (is (= "── 3 tools · 12.3k in · 845 out · $0.04 · 7s "
+         (toolview/turn-rule {:tools 3 :millis 7000 :usage {:input 12345 :output 845} :cost 0.0421} 10)))
+  (is (= "── 1.5M in · 2k out · $0.0012 · 1s "
+         (toolview/turn-rule {:tools 0 :millis 1000 :usage {:input 1500000 :output 2000} :cost 0.0012} 10)))
+  (is (= "── 999 in · 0 out · $0 · 1s "
+         (toolview/turn-rule {:tools 0 :millis 1000 :usage {:input 999 :output 0} :cost 0} 10))
+      "a free model shows $0; no cost hides the cost"))
 
 ;; ---------------------------------------------------------------- tool view
 
@@ -313,14 +331,44 @@
       (is (str/includes? (tui/picker-view empty) "No matches"))))
   (is (nil? (:done (tui/picker-key (tui/picker-state "Empty" [] nil 80 8) :enter)))))
 
+(deftest fuzzy-positions-mark-the-best-match
+  (is (= #{0 1 2} (tui/fuzzy-positions "gpt" "GPT-5")))
+  (is (= #{4 5} (tui/fuzzy-positions "ab" "axb-ab")) "the tightest match, not the first")
+  (is (= #{} (tui/fuzzy-positions "" "x")))
+  (is (= #{} (tui/fuzzy-positions "zz" "x"))))
+
+(deftest picker-pages-and-ends
+  (let [st (tui/picker-state "N" (map str (range 20)) "0" 80 9)]  ; 5 rows
+    (is (= 5 (:index (tui/picker-key st :page-down))))
+    (is (= 0 (:index (tui/picker-key (tui/picker-key st :page-down) :page-up))))
+    (is (= [19 15] ((juxt :index :offset) (tui/picker-key st :end))))
+    (is (= [0 0] ((juxt :index :offset) (tui/picker-key (tui/picker-key st :end) :home))))
+    (is (= 19 (:index (reduce tui/picker-key st (repeat 9 :page-down)))) "paging stops at the end")
+    (is (= 5 (:index (first (tui/picker-update st (msg/key-press :page-down))))))))
+
+(deftest picker-notes-and-styles
+  (let [st (tui/picker-state "P" ["ollama" "openai"] "ollama" 40 8
+                             {:notes {"ollama" "deepseek" "openai" "KEY is not set"} :muted #{"openai"}})
+        view (tui/picker-view st)]
+    (is (str/includes? view "▌ ● ollama  deepseek") "notes line up in a column")
+    (is (str/includes? view "    openai  KEY is not set"))
+    (is (every? #(<= (count %) 40) (str/split-lines view)))
+    (reset! ui/on true)
+    (try
+      (let [v (tui/picker-view (tui/picker-key st [:insert "oa"]))]
+        (is (str/includes? v "\u001b[33m\u001b[1mo") "a matched character is highlighted")
+        (is (str/includes? v "\u001b[33mKEY is not set") "a muted item's note is a warning"))
+      (finally (reset! ui/on false)))))
+
 (deftest picker-render-and-charm-messages
   (let [st (tui/picker-state "Models" ["a" "b" "c" "d"] "d" 80 6)
         view (tui/picker-view st)]
     (is (str/includes? view "current: d"))
-    (is (str/includes? view "> * d"))
+    (is (str/includes? view "▌ ● d") "the selected row has a bar, the current item a dot")
     (is (not (str/includes? view "    a")))
     (is (str/includes? view "Enter selects"))
-    (is (str/includes? view "Esc/Ctrl-C cancels"))
+    (is (str/includes? view "Esc cancels"))
+    (is (str/includes? view "2 more ↑") "rows scrolled off the top are counted")
     (is (= 6 (count (str/split-lines view))))
     (let [[resized cmd] (tui/picker-update st (msg/window-size 20 5))]
       (is (nil? cmd))

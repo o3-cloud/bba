@@ -31,10 +31,11 @@
 (defn- f [dir & parts] (str (apply fs/path dir parts)))
 
 (defn valid-name?
-  "Lowercase letters and digits joined by single hyphens, at most 64 chars; not a /world subcommand."
+  "Lowercase letters and digits joined by single hyphens, at most 64 chars; never a
+  /world subcommand word, so /world temp always means a temporary fork."
   [n]
   (boolean (and (string? n) (<= 1 (count n) 64) (re-matches #"[a-z0-9]+(-[a-z0-9]+)*" n)
-                (not (#{"new" "fork"} n)))))
+                (not (#{"new" "fork" "temp"} n)))))
 
 (defn world-names
   "Names of the worlds in this project (folders with a world.edn), sorted."

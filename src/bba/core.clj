@@ -75,11 +75,25 @@
           (final-answer? m) (recur more (into done (conj pending m)) [])
           :else (recur more done (conj pending m)))))
 
+(defn parse-lines
+  "Parse session JSONL into messages. A crash can leave the last line half-written, so
+  the read stops at the first line that does not parse: a good prefix loads, and a torn
+  or corrupt record never becomes a message. Warns with the line number when it stops."
+  [text]
+  (let [msgs (reduce (fn [acc [i l]]
+                       (if (str/blank? l)
+                         acc
+                         (let [m (try (json/parse-string l true) (catch Exception _ ::bad))]
+                           (if (= ::bad m)
+                             (reduced (with-meta acc {:stopped-at (inc i)}))
+                             (conj acc (select-keys m [:role :content]))))))
+                     [] (map-indexed vector (str/split-lines text)))]
+    (when-let [n (:stopped-at (meta msgs))]
+      (ext/warn "session file is damaged at line " n "; loaded the first " (count msgs) " record(s)"))
+    msgs))
+
 (defn load-session [file]
-  (->> (str/split-lines (slurp file))
-       (remove str/blank?)
-       (map #(select-keys (json/parse-string % true) [:role :content]))
-       replayable))
+  (replayable (parse-lines (slurp file))))
 
 (defn log-message!
   "Append `msg` to the session file, tagged with the time and the world (ctx :world) it ran in."
@@ -162,16 +176,26 @@
   [ctx ev]
   (if-let [f (:show ctx)] (f ev) (when-let [p (:print ctx)] (p (:text ev)))))
 
+(defn- incomplete-note [why]
+  (str "\n\n(stopped: the model returned an incomplete response (" why "): "
+       (if (= "max_output_tokens" why)
+         "it ran out of room while thinking; try a shorter question or a lower reasoning effort"
+         "the server stopped before producing an answer")
+       ")"))
+
 (defn run-turns
   "Call the provider until it stops asking for tools.
-  Returns {:status :ok|:max-turns, :text final-text, :messages all-messages}."
+  Returns {:status :ok|:incomplete|:max-turns, :text final-text, :messages all-messages,
+  :usage the summed {:input :output :cost} the provider reported, or nil}. A reply the
+  provider marked :incomplete returns :status :incomplete, never :ok: a cut answer must
+  not look like a finished turn."
   [ctx messages]
   (let [call (or (ext/provider) (provider/from-env (:env ctx)))
         max-turns (or (:max-turns ctx) default-max-turns)
         width (or (get-in ctx [:md :width]) 80)]
-    (loop [messages messages turn 0]
+    (loop [messages messages turn 0 usage nil]
       (if (>= turn max-turns)
-        {:status :max-turns :messages messages
+        {:status :max-turns :messages messages :usage usage
          :text (str "stopped: reached max turns (" max-turns ")")}
         (let [_ (when-let [f (:on-request ctx)] (f))
               base (cond-> {:messages messages :system (prompt-for ctx) :tools (tool-specs)}
@@ -179,11 +203,15 @@
               reply (call (apply-request-hooks base ctx))
               amsg {:role "assistant" :content (:content reply)}
               uses (filter #(= "tool_use" (:type %)) (:content reply))
-              messages (conj messages amsg)]
+              messages (conj messages amsg)
+              usage (provider/add-usage usage (:usage reply))]
           (log-message! ctx amsg)
           (if (empty? uses)
-            {:status :ok :messages messages
-             :text (str/join "\n" (keep #(when (= "text" (:type %)) (:text %)) (:content reply)))}
+            (let [text (str/join "\n" (keep #(when (= "text" (:type %)) (:text %)) (:content reply)))]
+              (if-let [why (:incomplete reply)]
+                {:status :incomplete :messages messages :usage usage :incomplete why
+                 :text (str text (incomplete-note why))}
+                {:status :ok :messages messages :usage usage :text text}))
             (let [results (mapv (fn [u]
                                   (show ctx {:phase :call :tool (:name u) :input (:input u)
                                              :text (toolview/call-str (:name u) (:input u) width)})
@@ -195,7 +223,7 @@
                                 uses)
                   umsg {:role "user" :content results}]
               (log-message! ctx umsg)
-              (recur (conj messages umsg) (inc turn)))))))))
+              (recur (conj messages umsg) (inc turn) usage))))))))
 
 (defn user-message [text] {:role "user" :content [{:type "text" :text text}]})
 

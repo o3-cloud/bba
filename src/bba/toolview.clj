@@ -26,16 +26,46 @@
 (defn call-str
   "A tool call, collapsed to one line: a bold label, then for a world tool its code
   with the line breaks folded to spaces, else the clipped JSON input. With `url` the
-  label is a link to the call's full detail."
+  label is a link to the call's full detail. The result is never wider than `width`."
   ([tool input width] (call-str tool input width nil))
   ([tool input width url]
    (let [label (or (labels tool) tool)
          head (str (ui/cyan "●") " " (link url (ui/bold label)) " ")
-         room (max 20 (- width (count label) 3))]
-     (if (labels tool)
-       (str head (clip (str/trim (str (:code input))) room)
-            (when-let [rs (seq (:remove input))] (ui/dim (str " remove " (str/join " " rs)))))
-       (str head (ui/dim (clip (json/generate-string input) room)))))))
+         room (- width (count head))]
+     (cond
+       (< room 1) (subs head 0 (max 0 width))   ; too narrow for the label alone
+       (labels tool)
+       (let [code (clip (str/trim (str (:code input))) room)
+             rs (seq (:remove input))
+             tail (when rs (str " remove " (str/join " " rs)))
+             room2 (- room (count code))]
+         (str head code (when (and tail (pos? room2)) (ui/dim (clip tail room2)))))
+       :else (str head (ui/dim (clip (json/generate-string input) room)))))))
+
+(defn- tokens-str
+  "A token count in a few characters: 845, 12.3k, 1.2M."
+  [n]
+  (cond (< n 1000) (str n)
+        (< n 999500) (str/replace (format "%.1fk" (/ n 1e3)) #"\.0k$" "k")
+        :else (str/replace (format "%.1fM" (/ n 1e6)) #"\.0M$" "M")))
+
+(defn- cost-str [usd]
+  (cond (zero? usd) "$0"
+        (< usd 0.01) (format "$%.4f" usd)
+        :else (format "$%.2f" usd)))
+
+(defn turn-rule
+  "The dim rule that closes a turn: the tool count (when there were calls), the
+  input and output tokens and the cost (when known), and the elapsed seconds, then
+  a line to `width`."
+  [{:keys [tools millis usage cost]} width]
+  (let [parts (cond-> []
+                (pos? tools) (conj (str tools (if (= 1 tools) " tool" " tools")))
+                usage (conj (str (tokens-str (:input usage)) " in") (str (tokens-str (:output usage)) " out"))
+                cost (conj (cost-str cost))
+                :always (conj (format "%.0fs" (/ millis 1000.0))))
+        label (str "── " (str/join " · " parts) " ")]
+    (ui/dim (str label (apply str (repeat (max 0 (- width (count label))) "─"))))))
 
 (defn- read-result [s]
   (try (let [v (edn/read-string {:default (fn [_ v] v)} s)] (when (map? v) v))

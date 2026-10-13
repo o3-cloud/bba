@@ -277,12 +277,30 @@
       (let [result (#'main/switch-provider ctx "")]
         (is (= "openai" (provider/provider-name (:env result))))
         (is (= "gpt-5" (provider/model-name (:env result))))
-        (is (= ["Providers" (sort (keys provider/providers)) "ollama"] (first @seen)))))
+        (is (= ["Select a provider" (sort (keys provider/providers)) "ollama"] (take 3 (first @seen))))
+        (is (= 1 (count @seen)) "openai has one model, so no model list follows")
+        (let [{:keys [notes muted]} (last (first @seen))]
+          (is (= "old" (notes "ollama")) "the current provider shows its current model")
+          (is (= "gpt-5" (notes "openai")))
+          (is (= "ANTHROPIC_API_KEY is not set" (notes "anthropic")))
+          (is (contains? muted "anthropic"))
+          (is (not (contains? muted "openai"))))))
+    (with-redefs [tui/pick! (fn [title & _] (swap! seen conj [title]) (if (= title "Select a provider") "ollama" "m2"))
+                  provider/model-catalog (constantly ["m1" "m2"])]
+      (let [ctx' (assoc-in ctx [:env "BBA_PROVIDER"] "openai")]
+        (is (= ["ollama" "m2"] ((juxt provider/provider-name provider/model-name) (:env (#'main/switch-provider ctx' ""))))
+            "a new provider opens its model list next")
+        (is (= ["Select a model for ollama"] (last @seen)))))
+    (with-redefs [tui/pick! (fn [title & _] (when (= title "Select a provider") "ollama"))
+                  provider/model-catalog (constantly ["m1" "m2"])]
+      (is (= provider/default-model
+             (provider/model-name (:env (#'main/switch-provider (assoc-in ctx [:env "BBA_PROVIDER"] "openai") ""))))
+          "Esc in the model list keeps the default model"))
     (with-redefs [tui/pick! (choose "anthropic")]
       (is (= ctx (#'main/switch-provider ctx nil)) "credential validation still applies"))
     (with-redefs [tui/pick! (choose "new") provider/model-catalog (constantly ["old" "new"])]
       (is (= "new" (get-in (#'main/switch-model ctx "") [:env "BBA_MODEL"])))
-      (is (= ["Models for ollama" ["old" "new"] "old"] (last @seen))))
+      (is (= ["Select a model for ollama" ["old" "new"] "old"] (take 3 (last @seen)))))
     (with-redefs [tui/pick! (choose nil) provider/model-catalog (constantly ["old"])]
       (is (= ctx (#'main/switch-provider ctx "")))
       (is (= ctx (#'main/switch-model ctx ""))))
@@ -297,3 +315,34 @@
                   (is (= plain (#'main/switch-model plain ""))))]
         (is (str/includes? out "providers: anthropic, codex, ollama, openai, openrouter"))
         (is (str/includes? out "models: old, extra"))))))
+
+;; ---------------------------------------------------------------- usage and cost
+
+(deftest usage-from-each-api
+  (testing "Anthropic: the stream's start and end are merged; cached input counts as input"
+    (let [acc (-> {:blocks (sorted-map)}
+                  (provider/anthropic-step {:type "message_start"
+                                            :message {:usage {:input_tokens 10 :cache_read_input_tokens 90
+                                                              :output_tokens 1}}} nil)
+                  (provider/anthropic-step {:type "message_delta" :delta {:stop_reason "end_turn"}
+                                            :usage {:output_tokens 42}} nil))]
+      (is (= {:input 100 :output 42} (provider/anthropic-usage (get-in acc [:message :usage]))))
+      (is (= "end_turn" (get-in acc [:message :stop_reason])))
+      (is (nil? (provider/anthropic-usage nil)))))
+  (testing "Chat Completions: the last stream chunk, and OpenRouter's cost"
+    (let [acc (-> openai/stream-init
+                  (openai/chunk-step {:choices [{:delta {:content "hi"}}]} nil)
+                  (openai/chunk-step {:choices [] :usage {:prompt_tokens 7 :completion_tokens 3 :cost 0.002}} nil))]
+      (is (= {:input 7 :output 3 :cost 0.002} (:usage (openai/->reply (openai/stream-body acc)))))
+      (is (= "hi" (get-in (openai/->reply (openai/stream-body acc)) [:content 0 :text]))))
+    (is (nil? (:usage (openai/->reply {:choices [{:message {:content "x"}}]}))) "no usage, no map"))
+  (testing "a turn sums the usage of its requests"
+    (is (= {:input 3 :output 5} (provider/add-usage {:input 1 :output 2} {:input 2 :output 3})))
+    (is (= {:input 1 :output 2} (provider/add-usage nil {:input 1 :output 2})))))
+
+(deftest cost-from-the-provider-or-bba-price
+  (let [u {:input 2000000 :output 1000000}]
+    (is (= 0.5 (provider/usage-cost {"BBA_PRICE" "9,9"} (assoc u :cost 0.5))) "the provider's figure wins")
+    (is (= 21.0 (provider/usage-cost {"BBA_PRICE" " 3 , 15 "} u)) "dollars per million tokens")
+    (is (nil? (provider/usage-cost {} u)))
+    (is (nil? (provider/usage-cost {"BBA_PRICE" "cheap"} u)) "a bad price shows no cost")))

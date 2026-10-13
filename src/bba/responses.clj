@@ -83,7 +83,7 @@
   "A folded Responses stream -> a bba assistant message (Anthropic form).
   Throws when the server stopped early and left no usable answer, rather than
   returning an empty message that would look like a finished turn."
-  [{:keys [text calls incomplete]}]
+  [{:keys [text calls incomplete usage]}]
   (let [calls (vals calls)]
     (when (and (str/blank? text) (empty? calls))
       (throw (ex-info (if incomplete
@@ -98,13 +98,20 @@
                         ;; session. Fail the turn instead.
                         "no answer from the model: the server streamed an empty response (no text and no tool call)")
                       (cond-> {} incomplete (assoc :incomplete incomplete)))))
-    {:role "assistant"
-     :stop_reason (if (seq calls) "tool_use" "end_turn")
-     :content (into (if (str/blank? text) [] [{:type "text" :text text}])
-                    (map-indexed (fn [i {:keys [call_id name arguments]}]
-                                   {:type "tool_use" :id (or (not-empty call_id) (str "call_" i))
-                                    :name name :input (parse-arguments arguments)}))
-                    calls)}))
+    (cond->
+     {:role "assistant"
+      ;; An incomplete stream is not a finished answer: report the truncation so the
+      ;; caller (core/run-turns) can stop instead of treating a cut answer as done.
+      :stop_reason (cond (seq calls) "tool_use"
+                         incomplete "max_tokens"
+                         :else "end_turn")
+      :content (into (if (str/blank? text) [] [{:type "text" :text text}])
+                     (map-indexed (fn [i {:keys [call_id name arguments]}]
+                                    {:type "tool_use" :id (or (not-empty call_id) (str "call_" i))
+                                     :name name :input (parse-arguments arguments)}))
+                     calls)}
+      incomplete (assoc :incomplete incomplete)
+      usage (assoc :usage {:input (:input_tokens usage 0) :output (:output_tokens usage 0)}))))
 
 ;; ---------------------------------------------------------------- streaming
 
@@ -151,7 +158,11 @@
       ;; reasoning. Record it: the reply is empty or cut short, and the caller must
       ;; not present that as a finished answer.
       (= t "response.incomplete")
-      (assoc acc :incomplete (get-in event [:response :incomplete_details :reason] "incomplete"))
+      (assoc acc :incomplete (get-in event [:response :incomplete_details :reason] "incomplete")
+             :usage (get-in event [:response :usage]))
+
+      (= t "response.completed")
+      (assoc acc :usage (get-in event [:response :usage]))
 
       (= t "response.output_item.done")
       (let [{:keys [output_index item]} event]

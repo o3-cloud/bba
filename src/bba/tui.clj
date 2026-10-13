@@ -9,7 +9,8 @@
             [charm.components.viewport :as vp]
             [charm.message :as msg]
             [charm.program :as program]
-            [charm.style.core :as style]))
+            [charm.style.core :as style]
+            [bba.ui :as ui]))
 
 ;; The continuation prefix is derived from the prompt in `view-str`, so no `cont` def.
 
@@ -138,6 +139,7 @@
         :else nil))))
 
 (def ^:private caret-style (style/style :reverse true))
+(def ^:private submitted-style (style/style :bold true))
 
 (defn view-str
   "Pure: the charm view for one frame -- the shown prompt, the buffer with a blank
@@ -145,12 +147,18 @@
   space when the cursor is past the end). `plain` is the prompt without styling: its
   width, not the shown prompt's, decides the continuation indent, so ANSI escapes in
   the styled prompt cannot shift the layout."
-  [plain shown {:keys [buf pos]}]
+  [plain shown {:keys [buf pos done]}]
   (let [buf (or buf "")
         pos (or pos 0)
         cur (if (< pos (count buf)) (subs buf pos (inc pos)) " ")
-        marked (str (subs buf 0 pos) (style/render caret-style cur)
-                    (subs buf (min (inc pos) (count buf))))
+        marked (if done
+                 ;; the last frame stays in the transcript: no caret, and a sent
+                 ;; entry in bold, so it reads as the user's message
+                 (if (= :submit (first done))
+                   (str/join "\n" (map #(style/render submitted-style %) (str/split buf #"\n" -1)))
+                   buf)
+                 (str (subs buf 0 pos) (style/render caret-style cur)
+                      (subs buf (min (inc pos) (count buf)))))
         blank (apply str (repeat (count plain) " "))]
     (str shown (str/replace marked "\n" (str "\n" blank)))))
 
@@ -233,22 +241,37 @@
 
 ;; ---------------------------------------------------------------- selection list
 
+(defn- match-from
+  "The positions of `q` in `s` as a subsequence that starts at `start`, taking each
+  later character as early as it comes, or nil."
+  [q s start]
+  (loop [qi 1 ps [start]]
+    (if (= qi (count q))
+      ps
+      (when-let [p (str/index-of s (str (nth q qi)) (inc (peek ps)))]
+        (recur (inc qi) (conj ps p))))))
+
+(defn- best-match
+  "[score positions] for the best start of `query` in `candidate`, or nil."
+  [query candidate]
+  (let [q (str/lower-case query) s (str/lower-case candidate)]
+    (->> (range (count s))
+         (keep (fn [start]
+                 (when (= (first q) (nth s start))
+                   (when-let [ps (match-from q s start)]
+                     [[(if (= q s) 0 1) (- (inc (- (peek ps) start)) (count q)) start (count s)] ps]))))
+         sort first)))
+
 (defn fuzzy-score
   "Pure: a case-insensitive subsequence score. Lower scores rank first; nil rejects."
   [query candidate]
-  (let [q (str/lower-case query) s (str/lower-case candidate)]
-    (if (empty? q)
-      [0 0 0 0]
-      (->> (range (count s))
-           (keep (fn [start]
-                   (when (= (first q) (nth s start))
-                     (loop [qi 1 end start]
-                       (if (= qi (count q))
-                         [(if (= q s) 0 1)
-                          (- (inc (- end start)) (count q)) start (count s)]
-                         (when-let [next-pos (str/index-of s (str (nth q qi)) (inc end))]
-                           (recur (inc qi) next-pos)))))))
-           sort first))))
+  (if (empty? query) [0 0 0 0] (first (best-match query candidate))))
+
+(defn fuzzy-positions
+  "Pure: the set of character indexes in `candidate` that the best match of `query`
+  uses; empty for an empty query or no match."
+  [query candidate]
+  (if (empty? query) #{} (set (second (best-match query candidate)))))
 
 (defn fuzzy-matches
   "Pure: rank names by match score, then name. Empty queries retain catalog order."
@@ -266,16 +289,21 @@
     (assoc st :index index :offset offset)))
 
 (defn picker-state
-  "Pure: create a picker with the current item selected."
-  [title items current columns lines]
-  (let [items (vec (distinct items))]
-    (picker-fit {:title title :items items :current current :query "" :matches items
-                 :index (or (first (keep-indexed #(when (= %2 current) %1) items)) 0)
-                 :offset 0 :rows (max 1 (- lines 4)) :columns (max 1 columns)})))
+  "Pure: create a picker with the current item selected. `opts` may give :notes,
+  item -> a short note shown beside it, and :muted, the items that cannot be used
+  as they are (shown dim, their note as a warning; still selectable)."
+  ([title items current columns lines] (picker-state title items current columns lines nil))
+  ([title items current columns lines {:keys [notes muted]}]
+   (let [items (vec (distinct items))]
+     (picker-fit {:title title :items items :current current :query "" :matches items
+                  :notes (or notes {}) :muted (set muted)
+                  :index (or (first (keep-indexed #(when (= %2 current) %1) items)) 0)
+                  :offset 0 :rows (max 1 (- lines 4)) :columns (max 1 columns)}))))
 
 (defn picker-key
-  "Pure: apply a key. Enter selects; Escape and Ctrl-C cancel without a value."
-  [{:keys [query matches index] :as st} key]
+  "Pure: apply a key. Enter selects; Escape and Ctrl-C cancel without a value.
+  Up/Down move one row, :page-up/:page-down one screen, Home/End to either end."
+  [{:keys [query matches index rows] :as st} key]
   (if (:done st)
     st
     (let [[k arg] (if (vector? key) key [key])
@@ -291,6 +319,10 @@
                                                :matches (fuzzy-matches query' (:items st))))
         (= k :up) (picker-fit (update st :index dec))
         (= k :down) (picker-fit (update st :index inc))
+        (= k :page-up) (picker-fit (update st :index - rows))
+        (= k :page-down) (picker-fit (update st :index + rows))
+        (= k :home) (picker-fit (assoc st :index 0))
+        (= k :end) (picker-fit (assoc st :index (dec (count matches))))
         :else st))))
 
 (defn picker-update
@@ -301,31 +333,63 @@
                                                              :rows (max 1 (- (:height m) 4))))
                      (msg/paste? m) (picker-key st [:insert (str (:text m))])
                      (msg/key-match? m "esc") (picker-key st :escape)
+                     (msg/key-match? m "pgup") (picker-key st :page-up)
+                     (msg/key-match? m "pgdown") (picker-key st :page-down)
                      :else (picker-key st (press->key m)))]
     [next-state (when (:done next-state) program/quit-cmd)]))
 
+(defn- fit-segments
+  "Join [text style-fn] segments, cutting the plain text at `columns` cells. The
+  style fns add only escapes, so the cut is made on the plain text first."
+  [columns segments]
+  (loop [[[text f] & more] segments room columns out (StringBuilder.)]
+    (if (or (nil? text) (<= room 0))
+      (str out)
+      (let [text (str/replace (str text) #"[\p{Cntrl}]" "")
+            piece (subs text 0 (min room (count text)))]
+        (.append out ((or f identity) piece))
+        (recur more (- room (count piece)) out)))))
+
 (defn picker-view
-  "Pure: show the query, current item, visible matches, and controls."
-  [{:keys [title current query matches index offset rows columns]}]
-  (let [clip (fn [s] (let [s (str/replace (str s) #"[\p{Cntrl}]" "")]
-                       (subs s 0 (min columns (count s)))))
+  "Pure: the title, the search line, the visible matches and a footer. The selected
+  row has a bar, the current item a dot, matched characters are highlighted, and a
+  note sits in a column beside each item."
+  [{:keys [title current query matches index offset rows columns notes muted]}]
+  (let [fit (partial fit-segments columns)
         visible (subvec matches offset (min (count matches) (+ offset rows)))
-        lines (concat [(str title " · current: " current) (str "Search: " query)]
-                      (if (seq visible)
-                        (map-indexed (fn [i item]
-                                       (str (if (= index (+ offset i)) "> " "  ")
-                                            (if (= item current) "* " "  ") item)) visible)
-                        ["No matches"])
-                      [(str (count matches) " matches · * current")
-                       "↑ ↓ move · Enter selects · Esc/Ctrl-C cancels"])]
-    (str/join "\n" (map clip lines))))
+        name-w (min (max 1 (quot columns 2)) (reduce max 0 (map count visible)))
+        row (fn [i item]
+              (let [selected? (= index (+ offset i))
+                    muted? (contains? muted item)
+                    hits (fuzzy-positions query item)
+                    base (cond muted? ui/dim selected? ui/bold :else identity)
+                    note (get notes item)]
+                (fit (concat [[(if selected? "▌ " "  ") ui/cyan]
+                              [(if (= item current) "● " "  ") ui/green]]
+                             (map-indexed (fn [j c] [(str c) (if (hits j) (comp ui/yellow ui/bold) base)]) item)
+                             (when note
+                               [[(apply str (repeat (max 2 (- (+ name-w 2) (count item))) " "))]
+                                [note (if muted? ui/yellow ui/dim)]])))))
+        above offset
+        below (- (count matches) offset (count visible))]
+    (str/join "\n"
+              (concat [(fit [[title ui/bold] [(str "  current: " current) ui/dim]])
+                       (fit [["› " ui/cyan] [query] [" " #(if (ui/enabled?) (str "\u001b[7m" % "\u001b[0m") %)]])]
+                      (if (seq visible) (map-indexed row visible) [(fit [["  No matches" ui/dim]])])
+                      [(fit [[(str (count matches) (if (= 1 (count matches)) " match" " matches")
+                                   (when (pos? above) (str " · " above " more ↑"))
+                                   (when (pos? below) (str " · " below " more ↓")))
+                              ui/dim]])
+                       (fit [["↑ ↓ PgUp PgDn move · Enter selects · Esc cancels" ui/dim]])]))))
 
 (defn pick!
-  "Run a charm selection list after the prompt exits. Return nil on cancel."
-  [title items current]
-  (let [result (program/run {:init (picker-state title items current (width) (height))
-                             :update picker-update :view picker-view
-                             :alt-screen true :overflow :bottom
-                             :ctrl-c :message :bracketed-paste true :dark-background? true})
-        [action value] (:done result)]
-    (when (= action :select) value)))
+  "Run a charm selection list after the prompt exits. Return nil on cancel. `opts`
+  is as for `picker-state`."
+  ([title items current] (pick! title items current nil))
+  ([title items current opts]
+   (let [result (program/run {:init (picker-state title items current (width) (height) opts)
+                              :update picker-update :view picker-view
+                              :alt-screen true :overflow :bottom
+                              :ctrl-c :message :bracketed-paste true :dark-background? true})
+         [action value] (:done result)]
+     (when (= action :select) value))))

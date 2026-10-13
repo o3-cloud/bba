@@ -55,14 +55,23 @@
   [body]
   (when (and (:error body) (empty? (:choices body)))  ; OpenRouter can send errors with HTTP 200
     (throw (ex-info (str "API error: " (get-in body [:error :message] (:error body))) {})))
-  (let [{:keys [content tool_calls]} (get-in body [:choices 0 :message])]
-    {:role "assistant"
-     :stop_reason (if (seq tool_calls) "tool_use" "end_turn")
-     :content (into (if (str/blank? content) [] [{:type "text" :text content}])
-                    (map-indexed (fn [i {:keys [id function]}]
-                                   {:type "tool_use" :id (or (not-empty id) (str "call_" i))
-                                    :name (:name function) :input (parse-arguments (:arguments function))}))
-                    tool_calls)}))
+  (let [{:keys [content tool_calls]} (get-in body [:choices 0 :message])
+        {:keys [prompt_tokens completion_tokens cost]} (:usage body)]
+    ;; No text and no tool call: an empty answer. Returning it would look like a
+    ;; finished turn and, once logged, leave a `content: []` turn in the session.
+    (when (and (str/blank? content) (empty? tool_calls))
+      (throw (ex-info "no answer from the model: the server returned an empty response (no text and no tool call)" {})))
+    (cond->
+     {:role "assistant"
+      :stop_reason (if (seq tool_calls) "tool_use" "end_turn")
+      :content (into (if (str/blank? content) [] [{:type "text" :text content}])
+                     (map-indexed (fn [i {:keys [id function]}]
+                                    {:type "tool_use" :id (or (not-empty id) (str "call_" i))
+                                     :name (:name function) :input (parse-arguments (:arguments function))}))
+                     tool_calls)}
+      (or prompt_tokens completion_tokens)
+      (assoc :usage (cond-> {:input (or prompt_tokens 0) :output (or completion_tokens 0)}
+                      (number? cost) (assoc :cost cost))))))  ; OpenRouter reports the cost
 
 ;; ---------------------------------------------------------------- streaming
 
@@ -82,10 +91,12 @@
                               (seq id) (assoc :id id)
                               (:name function) (update-in [:function :name] str (:name function))
                               args (update-in [:function :arguments] str (if (string? args) args (json/generate-string args)))))))
-            (update acc :content str content)
+            (cond-> (update acc :content str content)
+              (:usage chunk) (assoc :usage (:usage chunk)))  ; the last chunk, when asked for
             tool_calls)))
 
 (defn stream-body
   "Folded stream -> a response body for `->reply`."
-  [{:keys [content tool_calls]}]
-  {:choices [{:message {:content content :tool_calls (vec (vals tool_calls))}}]})
+  [{:keys [content tool_calls usage]}]
+  {:choices [{:message {:content content :tool_calls (vec (vals tool_calls))}}]
+   :usage usage})

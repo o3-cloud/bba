@@ -115,8 +115,9 @@
 (defn- tool-shower
   "The :show handler for a terminal: each call is one collapsed line whose label
   links to a file with its full detail, and each finished call is added to
-  (:calls ctx) for Ctrl-O."
-  [ctx live out]
+  (:calls ctx) for Ctrl-O. `enter!` opens a tool block, after a blank line when
+  the last block was not one."
+  [ctx live out enter!]
   (let [pending (atom nil)
         width (or (get-in ctx [:md :width]) (tui/width))]
     (fn [{:keys [phase tool input content error?]}]
@@ -124,6 +125,7 @@
         ((:flush out))
         (if (= phase :call)
           (let [f (detail-file ctx tool)]
+            (enter! :tool)
             (reset! pending f)
             (ui/log! (toolview/call-str tool input width (some->> f (str "file://"))))
             (ui/start! (str "running " tool "...")))
@@ -146,23 +148,42 @@
 
 (defn- agent-run
   "One user message through the loop. Returns [status new-messages].
-  With :stream? in ctx: spinner while waiting, streamed text, dim tool lines."
+  With :stream? in ctx: spinner while waiting, streamed text, dim tool lines.
+  The prompt, each run of tool calls and each answer are blocks with a blank line
+  between them, and a dim rule closes the turn."
   [ctx messages text]
   (let [umsg (core/user-message text)
         live (:live ctx (atom true))
         out (when (:stream? ctx) (stream-printer ctx))
+        t0 (System/currentTimeMillis)
+        block (atom :user)
+        enter! (fn [kind] (when (not= @block kind) (ui/log! "")) (reset! block kind))
+        on-text (fn [s]
+                  (when @live
+                    (ui/stop!)
+                    ;; a new answer block drops the model's leading blank lines
+                    (let [s (if (= :text @block) s (str/replace s #"^\s*\n" ""))]
+                      (when (seq s) (enter! :text) ((:text out) s)))))
         ctx (cond-> ctx
               out (assoc :on-request #(when @live (ui/start! "thinking..."))
-                         :on-text #(when @live (ui/stop!) ((:text out) %))
-                         :show (tool-shower ctx live out)))]
+                         :on-text on-text
+                         :show (tool-shower ctx live out enter!)))]
     (some-> (:calls ctx) (reset! []))
     (core/log-message! ctx umsg)
     (try
-      (let [{:keys [status text messages]} (core/run-turns ctx (conj messages umsg))]
+      (let [{:keys [status text messages usage]} (core/run-turns ctx (conj messages umsg))]
         (ui/stop!)
         (if (and out @(:streamed? out))
           ((:flush out))
-          (println (md/render (or (:md ctx) (md/context {:width (tui/width)})) text)))
+          (do (when out (enter! :text))
+              (println (md/render (or (:md ctx) (md/context {:width (tui/width)})) text))))
+        (when out
+          (enter! :end)
+          (println (toolview/turn-rule {:tools (count (some-> (:calls ctx) deref))
+                                        :millis (- (System/currentTimeMillis) t0)
+                                        :usage usage
+                                        :cost (when usage (provider/usage-cost (:env ctx) usage))}
+                                       (or (get-in ctx [:md :width]) (tui/width)))))
         [status messages])
       (finally (ui/stop!)))))
 
@@ -188,17 +209,50 @@
   (println (str "provider: " (provider/provider-name env) ", model: " (provider/model-name env)
                 (when (ext/provider) " (an extension replaced the provider; it ignores this)"))))
 
+(defn- provider-env
+  "`env` switched to provider `name` with its default model."
+  [env name]
+  (-> env (assoc "BBA_PROVIDER" name) (dissoc "BBA_MODEL")))
+
+(defn- provider-options
+  "Picker notes for each provider: the model it would use, or why it cannot run
+  (those are muted)."
+  [env]
+  (let [current (provider/provider-name env)
+        problems (into {} (keep (fn [n] (when-let [p (provider/check-env (provider-env env n))] [n p])))
+                       (keys provider/providers))]
+    {:notes (into {} (map (fn [n] [n (or (problems n)
+                                         (provider/model-name (if (= n current) env (provider-env env n))))]))
+                  (keys provider/providers))
+     :muted (set (keys problems))}))
+
+(defn- model-options [env]
+  {:notes {(:model (provider/providers (provider/provider-name env))) "default"}})
+
+(defn- pick-model
+  "Select a model for `env` in the picker, or nil on cancel."
+  [env models]
+  (tui/pick! (str "Select a model for " (provider/provider-name env))
+             models (provider/model-name env) (model-options env)))
+
 (defn- switch-provider
-  "No NAME: select a provider in a terminal, else list providers. NAME [MODEL]: switch."
+  "No NAME: select a provider in a terminal, then a model for a new provider that
+  can run and has more than one; else list providers. NAME [MODEL]: switch."
   [ctx args]
   (let [[name model] (str/split (str/trim (str args)) #"\s+")
         model (not-empty model)]
     (if (str/blank? name)
       (if (:tty? ctx)
-        (if-let [selected (tui/pick! "Providers" (sort (keys provider/providers))
-                                     (provider/provider-name (:env ctx)))]
-          (switch-provider ctx selected)
-          ctx)
+        (let [current (provider/provider-name (:env ctx))]
+          (if-let [selected (tui/pick! "Select a provider" (sort (keys provider/providers)) current
+                                       (provider-options (:env ctx)))]
+            (let [env (provider-env (:env ctx) selected)
+                  models (when (and (not= selected current) (nil? (provider/check-env env)))
+                           (provider/model-catalog env))
+                  ;; Esc here keeps the new provider's default model
+                  model (when (next models) (pick-model env models))]
+              (switch-provider ctx (str/join " " (remove nil? [selected model]))))
+            ctx))
         (do (show-model (:env ctx))
             (println (str "providers: " (str/join ", " (sort (keys provider/providers)))))
             ctx))
@@ -215,8 +269,7 @@
   (if (str/blank? name)
     (let [models (provider/model-catalog (:env ctx))]
       (if (:tty? ctx)
-        (if-let [selected (tui/pick! (str "Models for " (provider/provider-name (:env ctx)))
-                                     models (provider/model-name (:env ctx)))]
+        (if-let [selected (pick-model (:env ctx) models)]
           (switch-model ctx selected)
           ctx)
         (do (show-model (:env ctx))
