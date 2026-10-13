@@ -36,11 +36,14 @@
 (defonce worker (atom nil))
 (def ^:private lock (Object.))
 
-(defn- draw! []
-  (let [{:keys [i label t0]} @state
-        secs (format "%.0fs" (/ (- (System/currentTimeMillis) t0) 1000.0))]
-    (print (str "\r" (yellow (nth frames i)) " " label " " (dim secs) "\033[K"))
-    (flush)))
+(defn- draw!
+  "Redraw in place. Does nothing when the spinner has stopped: the worker thread can
+  reach this after `stop!` cleared the state, and the draw must not throw there."
+  []
+  (when-let [{:keys [i label t0]} @state]
+    (let [secs (format "%.0fs" (/ (- (System/currentTimeMillis) t0) 1000.0))]
+      (print (str "\r" (yellow (nth frames i)) " " label " " (dim secs) "\033[K"))
+      (flush))))
 
 (defn start! [label]
   (when @on
@@ -53,10 +56,13 @@
                 (future
                   (loop []
                     (Thread/sleep 100)
-                    (when @state
-                      (locking lock
-                        (swap! state update :i #(mod (inc %) (count frames)))
-                        (draw!))
+                    ;; Check the state again under the lock: `stop!` can clear it
+                    ;; while this thread sleeps, and swapping a nil state throws.
+                    (when (locking lock
+                            (when @state
+                              (swap! state update :i #(mod (inc %) (count frames)))
+                              (draw!)
+                              true))
                       (recur)))))))))
 
 (defn stop! []

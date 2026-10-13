@@ -21,11 +21,11 @@
 
 (defn- now [] (System/currentTimeMillis))
 (defn- wns [] (the-ns (:ns-name @state)))
-(defn- publics [] (ns-publics (wns)))
+(defn- interns [] (ns-interns (wns)))
 
 ;; ---------------------------------------------------------------- parse
 
-(def ^:private def-kinds '{defn :fn defmacro :macro def :var defonce :var defmulti :var})
+(def ^:private def-kinds '{defn :fn defn- :fn defmacro :macro def :var defonce :var defmulti :var})
 
 (defn- head [node]
   (when (= :list (rn/tag node))
@@ -73,16 +73,26 @@
 
 ;; ---------------------------------------------------------------- checkpoint / restore
 
-(defn- stateful? [x] (or (instance? clojure.lang.Atom x) (instance? clojure.lang.Volatile x)))
+(defn- stateful?
+  "A mutable reference whose contents a checkpoint must save and restore."
+  [x]
+  (or (instance? clojure.lang.Atom x) (instance? clojure.lang.Volatile x)
+      (instance? clojure.lang.Ref x)))
+
+(def ^:private print-length-cap 1000)
+(def ^:private print-level-cap 20)
+
+(defn- root-value [v] (try @v (catch Throwable _ nil)))
 
 (defn- live-state
-  "Contents of every public var that holds an atom or a volatile."
+  "Contents of every world var that holds an atom, volatile or ref. Private vars count:
+  a private counter is still state that a restore must not lose."
   []
-  (into {} (for [[s v] (publics) :let [x @v] :when (stateful? x)] [s @x])))
+  (into {} (for [[s v] (interns) :let [x (root-value v)] :when (stateful? x)] [s @x])))
 
 (defn- checkpoint []
   {:log (get-in @state [:snapshot :log]) :state (live-state)
-   :roots (into {} (for [[s v] (publics)] [s @v]))})
+   :roots (into {} (for [[s v] (interns)] [s (root-value v)]))})
 
 (defn- replay!
   "Discard the world namespace and rebuild it from an ordered log. A runaway thread
@@ -101,9 +111,11 @@
   "Rebuild the world from `cp` = {:log [..] :state {sym value}}: replay, then reset state vars."
   [{:keys [log] vals :state}]
   (let [t0 (now) w (replay! log)]
-    (doseq [[s v] vals :let [var (get (ns-publics w) s)] :when var :let [x @var]]
+    (doseq [[s v] vals :let [var (get (ns-interns w) s)] :when var :let [x (root-value var)]
+            :when (stateful? x)]
       (cond (instance? clojure.lang.Atom x) (reset! x v)
-            (instance? clojure.lang.Volatile x) (vreset! x v)))
+            (instance? clojure.lang.Volatile x) (vreset! x v)
+            (instance? clojure.lang.Ref x) (dosync (alter x (constantly v)))))
     (swap! state assoc :restore-ms (- (now) t0))
     w))
 
@@ -139,14 +151,14 @@
           (if (:e r)
             (error-result (:e r) {:form (:source fm) :form-index i})
             (recur more (inc i) (:v r))))
-        (let [unknown (remove #(contains? (ns-publics w) %) removals)
+        (let [unknown (remove #(contains? (ns-interns w) %) removals)
               _ (when (empty? unknown) (doseq [s removals] (ns-unmap w s)))
-              now-pub (ns-publics w)
-              new-vars (when (= op :execute) (sort (remove (:roots cp) (keys now-pub))))
+              now (ns-interns w)
+              new-vars (when (= op :execute) (sort (remove (:roots cp) (keys now))))
               redefined (when (= op :execute)
                           (sort (for [[s root] (:roots cp)
-                                      :let [var (get now-pub s)]
-                                      :when (or (nil? var) (not (identical? root @var)))] s)))
+                                      :let [var (get now s)]
+                                      :when (or (nil? var) (not (identical? root (root-value var))))] s)))
               inv (when (not= op :preview) (run-checks w invariants))]
           (cond
             (seq unknown) {:status :error :class "remove" :message (str "unknown name(s): " (str/join " " unknown))}
@@ -160,8 +172,13 @@
             :else {:status :accepted :value (bounded v max-result-chars)
                    :checks {:invariants inv :goals (run-checks w goals)}}))))))
 
-(defn- printable? [v]
-  (try (= v (edn/read-string (binding [*print-length* nil *print-level* nil] (pr-str v))))
+(defn- printable?
+  "True when `v` prints and reads back unchanged. The print is bounded, so a lazy or
+  infinite value is refused quickly instead of realizing the whole sequence."
+  [v]
+  (try (= v (edn/read-string (binding [*print-length* print-length-cap
+                                       *print-level* print-level-cap]
+                               (pr-str v))))
        (catch Exception _ false)))
 
 (defn- publish-snapshot!
@@ -274,7 +291,7 @@
 (defn catalogue
   "Accepted def forms (last definition wins, removals drop), with live arglists and doc."
   []
-  (let [pub (publics)]
+  (let [vars (interns)]
     (->> (get-in @state [:snapshot :log])
          (reduce (fn [m {:keys [defines remove] :as e}]
                    (cond remove (dissoc m remove)
@@ -282,7 +299,7 @@
                          :else m))
                  (sorted-map))
          vals
-         (keep (fn [e] (when-let [v (get pub (:name e))]
+         (keep (fn [e] (when-let [v (get vars (:name e))]
                          (assoc e :arglists (:arglists (meta v)) :doc (:doc (meta v)))))))))
 
 (defn- first-line [s] (some-> s str/split-lines first str/trim))
@@ -445,7 +462,11 @@
         pid (store/lock! dir)
         old @state]
     (when old
-      (when (not= (:dir old) dir) (store/unlock! (:dir old) (:pid old)))
+      (when (not= (:dir old) dir)
+        (store/unlock! (:dir old) (:pid old))
+        ;; A temporary world belongs to the session that made it: leaving it behind on a
+        ;; switch would leak the fork for the rest of the session, not just until exit.
+        (when (:temporary? old) (store/delete-world! (:dir old))))
       (when (and (:ns-name old) (not= (:ns-name old) (:ns adapter))) (remove-ns (:ns-name old))))
     (.addShutdownHook (Runtime/getRuntime) (Thread. #(store/unlock! dir pid)))
     (doseq [t (store/delete-tmp! dir)] (ext/warn "deleted leftover temp file " t))

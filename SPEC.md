@@ -93,20 +93,21 @@ flowchart TB
 
 | Module | Approx. lines | Responsibility |
 |---|---|---|
-| `src/bba/core.clj` | 222 | System prompt, agent loop (`run-turns`), tool dispatch (`run-tool`), request hooks, sessions, extension loading. Kernel, with `ext.clj` kept under 500 lines total. |
+| `src/bba/core.clj` | 255 | System prompt, agent loop (`run-turns`), tool dispatch (`run-tool`), request hooks, sessions, extension loading. Kernel, with `ext.clj` kept under 500 lines total. |
 | `src/bba/ext.clj` | 103 | Extension registry: `register-tool!`, `register-command!`, `on!`, `on-unload!`, `set-provider!`, lookup fns, `emit`, `reset-extensions!`. Every registration is tagged with its source file. |
-| `src/bba/world.clj` | 570 | The evaluator: form parsing, lint gate, checkpoint/restore, `attempt!`, `rollback!`, catalogue, world system prompt, the `/develop` `/execute` `/preview` `/rollback` `/functions` `/describe` `/history` `/status` commands, world switching. |
-| `src/bba/world_store.clj` | 235 | Pure file I/O for `.bba/worlds/<name>/`: adapter template and validation, atomic writes, revisions, `CURRENT`, advisory `LOCK`, `ops.jsonl`, migration and forking. |
+| `src/bba/world.clj` | 591 | The evaluator: form parsing, lint gate, checkpoint/restore, `attempt!`, `rollback!`, catalogue, world system prompt, the `/develop` `/execute` `/preview` `/rollback` `/functions` `/describe` `/history` `/status` commands, world switching. |
+| `src/bba/world_store.clj` | 236 | Pure file I/O for `.bba/worlds/<name>/`: adapter template and validation, atomic writes, revisions, `CURRENT`, advisory `LOCK`, `ops.jsonl`, migration and forking. |
 | `src/bba/sys.clj` | 28 | `world-requires` (aliases every world gets) and `sh` (bash helper with timeout and process-tree kill). |
-| `src/bba/lint.clj` | 57 | clj-kondo through the babashka pod; synthesises the `ns` header from `world-requires`. |
-| `src/bba/provider.clj` | 192 | Provider registry, `check-env`, `build-request`, `post-json`, `post-stream` (SSE), Anthropic stream folding, `from-env`. |
-| `src/bba/openai.clj` | 91 | Chat Completions translation, used by `openai`, `openrouter` and `ollama`. |
-| `src/bba/responses.clj` | 169 | Responses API translation, used by `codex`. |
+| `src/bba/lint.clj` | 77 | clj-kondo through the babashka pod; synthesises the `ns` header from `world-requires`. |
+| `src/bba/provider.clj` | 259 | Provider registry, `check-env`, `build-request`, `post-json`, `post-stream` (SSE), Anthropic stream folding, `from-env`. |
+| `src/bba/openai.clj` | 102 | Chat Completions translation, used by `openai`, `openrouter` and `ollama`. |
+| `src/bba/responses.clj` | 180 | Responses API translation, used by `codex`. |
 | `src/bba/codex_auth.clj` | 66 | Read-only access to the Codex CLI login (`~/.codex/auth.json`) and JWT claim reading. |
-| `src/bba/main.clj` | 299 | `parse-args`, one-turn driver `agent-run`, streaming printer, SIGINT cancellation, built-in commands, `interactive`, `run`, `-main`. |
-| `src/bba/tui.clj` | 183 | Charm.clj-backed line editor: pure `press->key` and `handle-key`, pure `view-str` frame, history file. |
-| `src/bba/md.clj` | 453 | Markdown to terminal rows: pure `md-line`/`render`, inline spans, wrapping, fenced panels, tables, `stream-row`. Widths in display cells via charm. |
-| `src/bba/ui.clj` | 71 | ANSI colours and the spinner worker. Every helper is identity when colour is off, so a caller styles unconditionally. |
+| `src/bba/main.clj` | 430 | `parse-args`, one-turn driver `agent-run`, streaming printer, SIGINT cancellation, built-in commands, `interactive`, `run`, `-main`. |
+| `src/bba/tui.clj` | 395 | Charm.clj-backed line editor: pure `press->key` and `handle-key`, pure `view-str` frame, history file. |
+| `src/bba/md.clj` | 465 | Markdown to terminal rows: pure `md-line`/`render`, inline spans, wrapping, fenced panels, tables, `stream-row`. Widths in display cells via charm. |
+| `src/bba/toolview.clj` | 127 | How a tool call and its result look in the transcript: one-line calls clipped to the width, status lines, token and cost text, the turn rule, and the markdown detail page. |
+| `src/bba/ui.clj` | 77 | ANSI colours and the spinner worker. Every helper is identity when colour is off, so a caller styles unconditionally. |
 | `extensions/skills.clj` | 506 | Agent Skills: discovery, validation, the `activate_skill` tool, `/skills`. |
 | `extensions/mcp.clj` | 351 | MCP servers as tools, JSON-RPC demultiplexing, both protocol eras, `/mcp`. |
 | `extensions/compaction.clj` | 458 | Context-window compaction as a `:request` hook, `/compact`. |
@@ -146,7 +147,7 @@ and one verifiable response. Keywords mark the pattern: `When` (event-driven), `
 |---|---|---|
 | R-WORLD-1 | bba shall keep each world in `<cwd>/.bba/worlds/<name>/`, holding `world.edn`, `revisions/`, `CURRENT`, `LOCK` and `ops.jsonl`. | `store/world-dir`, `store/ensure-dir!` |
 | R-WORLD-2 | bba shall name the first world `main`. | `store/default-world` |
-| R-WORLD-3 | bba shall accept a world name of 1 to 64 characters of lowercase letters and digits joined by single hyphens, and reject the names `new`, `fork`, the empty string, `../x`, `a/b` and 65-character names. | `store/valid-name?` |
+| R-WORLD-3 | bba shall accept a world name of 1 to 64 characters of lowercase letters and digits joined by single hyphens, and reject the names `new`, `fork`, `temp`, the empty string, `../x`, `a/b` and 65-character names. | `store/valid-name?` |
 | R-WORLD-4 | If `world.edn` does not declare `:ns` as a simple symbol outside the harness namespaces clojure, bba, babashka, sci, cheshire, rewrite-clj and user, then bba shall refuse to open the world. | `store/read-adapter` |
 | R-WORLD-5 | When a key is missing from `world.edn`, bba shall supply the default `:ns world`, `:invariants []`, `:goals []`, `:timeout-ms 3600000`, `:max-result-chars 4000`, `:lint :reject`. | `store/default-adapter` |
 | R-WORLD-6 | When a world folder is created, bba shall write `world.edn` from the documented template and a `.gitignore` listing `revisions/`, `CURRENT`, `LOCK`, `ops.jsonl` and `*.tmp`, and not list `world.edn`. | `store/ensure-dir!`, `store/adapter-template` |
@@ -162,7 +163,7 @@ and one verifiable response. Keywords mark the pattern: `When` (event-driven), `
 | R-WORLD-15a | When `/world fork NAME` is given without `REV`, bba shall fork the current revision of the open world. | `world/create!`, `store/fork!` |
 | R-WORLD-15b | When `/world fork NAME 0` is given, bba shall create an empty world. | `world/create!`, `store/fork!` |
 | R-WORLD-16 | If the named revision does not exist, then bba shall report `unknown revision: <n>` and leave no world folder behind. | `store/fork!` |
-| R-WORLD-17 | When `/world temp` is given, bba shall fork the open world into a temporary world, switch to it, and print that it is destroyed when the session ends. | `world/world-command` |
+| R-WORLD-17 | When `/world temp` is given, bba shall fork the open world into a temporary world, switch to it, and print that it is destroyed when the session ends. bba shall delete a temporary world when the session ends and when a switch leaves it. | `world/world-command`, `world/stop!`, `world/open!` |
 | R-WORLD-18 | If a world switch fails, then bba shall keep the current world open, keep its lock, and report the reason (`world in use by pid ...`, `... is not allowed`, `no world <name>` or `already in world <name>`). | `world/switch!`, `store/lock!`, `store/read-adapter` |
 | R-WORLD-19 | bba shall load every world namespace with the aliases `str`, `set`, `fs`, `sys`, `http`, `json`, `csv`, `yaml`, `io`, `edn`, `walk`, `pp` and `proc`, and re-require them on every rebuild so they survive restores. | `sys/world-requires`, `world/replay!` |
 | R-WORLD-20 | bba shall reject any world form headed `ns` or `in-ns` with class `reader` and the message that every form runs in the world namespace. | `world/parse-forms` |
@@ -192,10 +193,10 @@ and one verifiable response. Keywords mark the pattern: `When` (event-driven), `
 | R-EVAL-1 | bba shall expose exactly two tools to the model: `develop_form {code, remove?}`, which adds, redefines or removes definitions, and `execute_form {code}`, which evaluates an expression. | `world/register!` |
 | R-EVAL-2 | When `develop_form` is called, bba shall append the form's exact source to the accepted log, and record the defined name and kind for `defn`, `defmacro`, `def`, `defonce` and `defmulti` forms. | `world/parse-forms`, `world/attempt-checked!` |
 | R-EVAL-3 | When `develop_form` is called with a `remove` list, bba shall unmap each named var from the world namespace and append a removal entry to the accepted log. | `world/run-body`, `world/attempt-checked!` |
-| R-EVAL-4 | If `develop_form` names a var that is not public in the world namespace, then bba shall fail with class `remove` and the message `unknown name(s): <names>` and not unmap anything. | `world/run-body` |
+| R-EVAL-4 | If `develop_form` names a var that is not interned in the world namespace, then bba shall fail with class `remove` and the message `unknown name(s): <names>` and not unmap anything. | `world/run-body` |
 | R-EVAL-5 | When `execute_form` is called, bba shall evaluate the forms in the live world namespace, return the printed value of the last form, and not append to the accepted log. | `world/run-body`, `world/attempt-checked!` |
-| R-EVAL-6 | If `execute_form` defines a new var, then bba shall reject with reason `:new-var` and the list of names, and restore the checkpoint. | `world/run-body` |
-| R-EVAL-7 | If `execute_form` redefines or removes an existing var, then bba shall reject with reason `:redefined` and the list of names, and restore the checkpoint. | `world/run-body` |
+| R-EVAL-6 | If `execute_form` defines a new var, public or private, then bba shall reject with reason `:new-var` and the list of names, and restore the checkpoint. | `world/run-body` |
+| R-EVAL-7 | If `execute_form` redefines or removes an existing var, public or private, then bba shall reject with reason `:redefined` and the list of names, and restore the checkpoint. | `world/run-body` |
 | R-EVAL-8 | When forms are accepted, bba shall return an EDN map with `:status :accepted`, `:value` (the printed last value), `:op`, `:ms` and `:revision`. | `world/run-body`, `world/finish` |
 | R-EVAL-9 | When an accepted attempt defines or removes names, bba shall add `:defined` or `:removed` to the result. | `world/attempt-checked!` |
 | R-EVAL-10 | If evaluating a form throws, then bba shall restore the checkpoint, report status `:error` with `:class`, `:message`, `:form`, `:form-index` and `:data` (the exception data, bounded to 1000 characters), and write no revision. | `world/run-body`, `world/error-result` |
@@ -207,10 +208,10 @@ and one verifiable response. Keywords mark the pattern: `When` (event-driven), `
 | R-EVAL-16 | When the preview operation runs, bba shall return status `:preview` with the value, discard all effects including definitions and atom contents, and write no revision. | `world/attempt!`, `world/run-body` |
 | R-EVAL-17 | bba shall evaluate goals on every accepted change, report them as `{:name :ok}` entries under `:checks :goals`, and never reject a change for a failed goal. | `world/run-body` |
 | R-EVAL-18 | When a restore runs, bba shall remove the world namespace, recreate it, re-require the alias list, and replay the accepted log in order, unmapping removed names. | `world/replay!` |
-| R-EVAL-19 | When a restore runs, bba shall reset every public var holding an atom or a volatile to the value recorded in the checkpoint. | `world/restore!`, `world/live-state` |
+| R-EVAL-19 | When a restore runs, bba shall reset every interned var holding an atom, volatile or ref to the value recorded in the checkpoint. | `world/restore!`, `world/live-state` |
 | R-EVAL-20 | bba shall bound every result value with `pr-str` under `*print-length* 100` and `*print-level* 10`, cut at the adapter's `:max-result-chars` with the note `...[truncated: <n> chars]`. | `world/bounded` |
 | R-EVAL-21 | While an attempt runs, bba shall apply the adapter's `:timeout-ms`. | `world/attempt-checked!` |
-| R-EVAL-21a | If the attempt timeout expires, then bba shall cancel the evaluating future, count a timed-out thread, restore the checkpoint, and report class `timeout` with the runaway-thread note. | `world/attempt-checked!` |
+| R-EVAL-21a | If the attempt timeout expires, then bba shall cancel the evaluating future, count a timed-out thread, restore the checkpoint, and report class `timeout` with the runaway-thread note. The checkpoint runs on the caller thread, so the state print is bounded to 1000 elements and 20 levels and never realizes an unbounded value. | `world/attempt-checked!`, `world/printable?` |
 | R-EVAL-22 | When the attempt thread is interrupted (Ctrl-C), bba shall cancel the future, restore the checkpoint, log outcome `aborted`, and rethrow. | `world/attempt-checked!`, `world/with-sigint` |
 | R-EVAL-23 | If publishing the revision fails after the evaluation succeeded, then bba shall restore the checkpoint and report class `store` with `:restored-to <rev>`. | `world/attempt-checked!` |
 | R-EVAL-24 | bba shall record `:restore-ms` for the last restore and add `:restored-to <rev>` to every failed non-preview result. | `world/restore!`, `world/attempt-checked!` |
@@ -229,14 +230,14 @@ sequenceDiagram
   M->>T: develop_form / execute_form with code
   T->>T: parse forms and reject ns or in-ns
   T->>T: clj-kondo lint gate
-  T->>C: capture log and atom state
+  T->>C: capture log and atom, volatile and ref state
   T->>W: evaluate in a future with timeout
   alt every form succeeds and invariants hold
     W-->>T: value
     T->>S: write revision then move CURRENT
     T-->>M: accepted with revision
   else error, invariant failure, timeout, abort or store failure
-    T->>C: restore namespace and atom state
+    T->>C: restore namespace and reference state
     T-->>M: EDN with status, message, form and restored-to
   end
 ```
@@ -260,7 +261,7 @@ sequenceDiagram
 | ID | Requirement | Source |
 |---|---|---|
 | R-LOOP-1 | bba shall build each provider request from the message list, the system prompt and the tool specs sorted by tool name. | `core/run-turns`, `core/tool-specs` |
-| R-LOOP-2 | When the provider reply contains no `tool_use` block, bba shall finish the turn with status `:ok` and the concatenated text blocks as the answer. | `core/run-turns` |
+| R-LOOP-2 | When the provider reply contains no `tool_use` block, bba shall finish the turn with status `:ok` and the concatenated text blocks as the answer. If the reply carries `:incomplete`, bba shall instead return status `:incomplete` with the reason under `:incomplete`, append a note naming the reason to the text, and never present a cut answer as finished. | `core/run-turns` |
 | R-LOOP-3 | While the provider reply contains `tool_use` blocks, bba shall run each tool, show a line before and after each call, and feed the results back as a `tool_result` user message. | `core/run-turns` |
 | R-LOOP-4 | When the turn reaches the maximum number of provider calls, bba shall stop with status `:max-turns` and the text `stopped: reached max turns (<n>)`. | `core/run-turns` |
 | R-LOOP-5 | bba shall always return a `tool_result` block from a tool call and never throw out of the dispatcher. | `core/run-tool` |
@@ -293,6 +294,7 @@ sequenceDiagram
 | R-SESS-4 | When `-c` is given, bba shall sort the session files by name and continue the last one. | `core/latest-session` |
 | R-SESS-5 | bba shall read the world of a session from the last line that carries one, and fall back to the last active world when that world is gone, with a warning. | `core/session-world`, `main/run` |
 | R-SESS-6 | While compaction is active, bba shall leave the on-disk session file unchanged. | `core/tool-specs`, `extensions/compaction.clj` |
+| R-SESS-6a | If a session line does not parse, then bba shall stop reading at that line, load the records before it, and warn with the line number and the count loaded, so a torn write never becomes a message and never blocks a resume. | `core/parse-lines`, `core/load-session` |
 
 ### 3.7 Providers (`R-PROV`)
 
@@ -372,6 +374,7 @@ flowchart LR
 | R-TUI-7 | bba shall disable colours and the spinner when output is not a terminal or when `NO_COLOR` is set. | `ui/enable!` |
 | R-TUI-8 | While the model works, bba shall show a spinner labelled `thinking...` or `running <tool>...` with elapsed seconds, and pause it to print progress lines. | `ui/start!`, `ui/log!`, `main/agent-run` |
 | R-TUI-9 | bba shall render model text as markdown on a terminal: headings, bullets, quotes, rules, fenced panels, tables and inline spans become styled rows. | `md/md-line`, `md/render` |
+| R-TUI-9a | bba shall render a tool call as one line of at most the terminal width, giving the label, the code and a `remove` suffix a share of the width, so a long code with a removal list cannot overflow the row. | `toolview/call-str` |
 
 #### 3.9.1 Markdown renderer (`R-MD`)
 
@@ -509,7 +512,7 @@ needs one line of lookahead.
 {:ns world                  ; simple symbol; a fresh name, never a harness or library namespace
  :invariants [{:name "reverse works" :form (= "cba" (reverse-string "abc"))}]
  :goals      [{:name "has shout" :form (ifn? shout)}]
- :timeout-ms 3600000        ; README documents 30000 as the practical default
+ :timeout-ms 3600000        ; one hour; the default a fresh world gets (README "Limits")
  :max-result-chars 4000
  :lint :reject}             ; :reject | :warn | :off
 
@@ -813,7 +816,7 @@ left unpinned. They are recorded rather than turned into requirements.
 
 | # | Observation | Evidence |
 |---|---|---|
-| D-1 | **Timeout default conflicts.** `store/default-adapter` and `adapter-template` use `:timeout-ms 3600000` (one hour); the README says the default is 30 s (`:timeout-ms 30000` in its example, and "The world stops an attempt after `:timeout-ms` (30 s by default)"); `world_test.clj` pins 200 ms for its own case. A fresh world therefore gets one hour, not 30 s. | `world_store.clj:12,20`; `README.md:129,320` |
+| D-1 | **Timeout default (resolved).** `store/default-adapter`, `adapter-template`, the README example and `README.md` "Limits" now all state `:timeout-ms 3600000` (one hour). `world_test.clj` pins 200 ms only for its own case. | `world_store.clj:12,20`; `README.md:129,348` |
 | D-2 | **World file naming.** `README.md` and the world system prompt call the adapter `world.edn`, which matches the code. The task brief for this document referred to `world.json`; no JSON adapter exists. | `world_store.clj:70`; `README.md:123` |
 | D-3 | **`:preview` has no public tool.** `world/attempt!` supports `:op :preview` and `/preview` is registered, but the preview op is not exposed as a fourth tool, so the model can only preview through a command. | `world.clj:159,401`; `world.clj:390-398` |
 | D-4 | **`:execute` results are bounded, so `:value` is a string.** The model receives `pr-str` output, not data; round-tripping large values requires parsing. This is deliberate (R-NFR-5) but easy to mistake for a bug. | `world.clj:112-118` |

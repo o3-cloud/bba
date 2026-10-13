@@ -156,7 +156,8 @@
   "The derived view: task statement, summary appended to it, then the tail."
   [p summary]
   (let [head (update (:head-msg p) :content
-                     (fn [c] (conj (vec c) {:type "text" :text (summary-text (:middle-count p) summary)})))]
+                     (fn [c] (conj (blocks {:content c})
+                                   {:type "text" :text (summary-text (:middle-count p) summary)})))]
     (into [head] (apply concat (:tail p)))))
 
 ;; ---------------------------------------------------------------- summarizer
@@ -351,7 +352,7 @@
                   view (vec (concat
                              [(if (seq summary)
                                 (update head-msg :content
-                                        (fn [c] (conj (vec c)
+                                        (fn [c] (conj (blocks {:content c})
                                                       {:type "text"
                                                        :text (str "## Summary of earlier conversation\n\n"
                                                                   "(" folded " older messages, folded forward; "

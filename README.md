@@ -194,6 +194,8 @@ Other providers use the configured model and the provider's default model.
 Every list includes the current model. If discovery fails or returns no models, the list uses the current and default models.
 These lists do not verify that the account can use each model. Direct model names remain available.
 
+A dim line closes each turn: the tool calls, the input and output tokens that the provider reported, the cost when it is known (see `BBA_PRICE`), and the time. For example: `── 3 tools · 12.3k in · 845 out · $0.04 · 7s ──`.
+
 Answers stream as the model writes them. A finished line is redrawn as rendered markdown: headings, lists, quotes, rules, tables and fenced code panels, wrapped to the terminal width. A spinner shows `thinking...` or `running <tool>...`.
 
 ## Options
@@ -216,6 +218,7 @@ If stdin is a pipe, bba reads plain lines and prints only whole answers, so you 
 | `BBA_PROVIDER`, `BBA_MODEL` | Same as `--provider` and `--model`. |
 | `BBA_HOME` | Folder for history, user extensions and user config. The default is `~/.bba`. |
 | `BBA_MAX_TURNS` | Same as `--max-turns`. |
+| `BBA_PRICE` | The price as `INPUT,OUTPUT` US dollars per million tokens, for example `3,15`. The line at the end of a turn then shows the cost. OpenRouter sends its own cost, which bba uses instead. |
 | `BBA_SKILLS_TRUST=1` | Trust this project's skill folders (`.agents/skills`, `.bba/skills`). |
 | `BBA_SKILLS_EXTRA` | More skill folders, separated by `:`. |
 | `BBA_MCP_TRUST=1` | Trust this project's `.bba/mcp.json` (the MCP extension). |
@@ -342,7 +345,7 @@ WARNING: bba has no sandbox. Code in the world runs with your user rights. It ca
 - **No restarts.** Clojure has no condition/restart system like Common Lisp. When an attempt fails, bba restores the checkpoint, and the model fixes the code in a new attempt.
 - **Effects outside the world stay.** If a failed attempt wrote a file or ran a command, that file or command stays done.
 - **Restores replay code.** bba rebuilds the world from the saved source. Keep `develop_form` code to definitions, and put side effects in `execute_form`.
-- **One-hour timeout.** The world stops an attempt after `:timeout-ms`. A fresh world gets 3600000 (one hour); the example above sets 30000 (30 s). For long builds or tests, set `:timeout-ms` in `world.edn`.
+- **One-hour timeout.** The world stops an attempt after `:timeout-ms`. A fresh world gets 3600000 ms (one hour), and the example above sets the same value. For long builds or tests, set `:timeout-ms` in `world.edn`.
 - **Runaway loops.** A timeout cannot stop a busy loop that does not wait. That thread uses CPU until you quit bba. `/status` counts these threads.
 - **One bba for each folder.** A lock stops a second bba in the same folder.
 

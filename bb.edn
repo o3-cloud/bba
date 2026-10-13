@@ -2,7 +2,8 @@
  :deps {de.timokramer/charm.clj {:mvn/version "0.2.123"}}
  :tasks
  {test  {:doc  "Run the bba tests (offline, fake provider)"
-         :task (let [tests '[bba-test codex-test md-test providers-test tui-test ucii-check-test world-test]
+         :task (let [tests '[bba-test codex-test md-test providers-test tui-test ucii-check-test world-test
+                                  review-regression-test]
                      _ (apply require 'clojure.test tests)
                      {:keys [fail error]} (apply (resolve 'clojure.test/run-tests) tests)]
                  (when (pos? (+ fail error)) (System/exit 1)))}

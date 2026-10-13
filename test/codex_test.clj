@@ -157,6 +157,20 @@
                                 :item {:type "function_call" :call_id "c9" :name "bash"
                                        :arguments "{\"command\":\"pwd\"}"}}])))))))
 
+(deftest usage-from-the-last-event
+  (let [fold #(reduce (fn [a e] (responses/chunk-step a e nil)) responses/stream-init %)
+        text {:type "response.output_text.delta" :delta "hi"}]
+    (is (= {:input 12 :output 4}
+           (:usage (responses/reply-of-stream
+                    (fold [text {:type "response.completed"
+                                 :response {:usage {:input_tokens 12 :output_tokens 4}}}])))))
+    (is (= {:input 5 :output 9}
+           (:usage (responses/reply-of-stream
+                    (fold [text {:type "response.incomplete"
+                                 :response {:incomplete_details {:reason "max_output_tokens"}
+                                            :usage {:input_tokens 5 :output_tokens 9}}}])))))
+    (is (not (contains? (responses/reply-of-stream (fold [text])) :usage)))))
+
 (deftest folding-edge-cases
   (testing "bad JSON arguments become an empty input, not an error"
     (is (= [{:type "tool_use" :id "c1" :name "b" :input {}}]
