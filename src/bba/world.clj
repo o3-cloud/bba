@@ -7,6 +7,7 @@
   Not Common Lisp: there are no conditions or restarts. A failure restores, then reports."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
+            [parinferish.core :as parinfer]
             [rewrite-clj.node :as rn]
             [rewrite-clj.parser :as rp]
             [bba.ext :as ext]
@@ -49,6 +50,14 @@
                  :message "ns / in-ns is not allowed: every form runs in the world namespace"}}
         {:forms (mapv #(dissoc % :head) forms)}))
     (catch Exception e {:error {:status :error :class "reader" :message (ex-message e)}})))
+
+(defn- repair
+  "Fix unbalanced brackets from the indentation (parinfer indent mode). Returns the
+  repaired code, or nil when parinfer changes nothing or the result still does not parse."
+  [code]
+  (try (let [fixed (parinfer/flatten (parinfer/parse (or code "") {:mode :indent}))]
+         (when (and (not= fixed code) (not (:error (parse-forms fixed)))) fixed))
+       (catch Exception _ nil)))
 
 ;; ---------------------------------------------------------------- lint
 
@@ -214,18 +223,23 @@
 (declare attempt-checked!)
 
 (defn attempt!
-  "The one evaluator path. `op` is :develop, :execute or :preview. clj-kondo runs
-  first: with adapter :lint :reject (the default) an error finding rejects the code
-  before it is evaluated; warnings come back as :lint on the result."
+  "The one evaluator path. `op` is :develop, :execute or :preview. Code that does not
+  parse is repaired by parinfer when it can be; the repaired code runs and the result
+  carries :autofix. clj-kondo runs next: with adapter :lint :reject (the default) an
+  error finding rejects the code before it is evaluated; warnings come back as :lint."
   [{:keys [op code] :as in}]
   (let [t0 (now) parsed (parse-forms code)
+        fixed (when (:error parsed) (repair code))
+        [code parsed] (if fixed [fixed (parse-forms fixed)] [code parsed])
         findings (when (and (not (:error parsed)) (seq (:forms parsed))) (lint-forms code))
         errs (lint/errors findings)]
-    (if (and (seq errs) (= :reject (get-in @state [:adapter :lint])))
-      (finish op t0 {:status :rejected :reason :lint :lint errs
-                     :message "clj-kondo found errors; nothing was evaluated"})
-      (cond-> (attempt-checked! in t0 parsed)
-        (seq findings) (assoc :lint findings)))))
+    (cond-> (if (and (seq errs) (= :reject (get-in @state [:adapter :lint])))
+              (finish op t0 {:status :rejected :reason :lint :lint errs
+                             :message "clj-kondo found errors; nothing was evaluated"})
+              (cond-> (attempt-checked! (assoc in :code code) t0 parsed)
+                (seq findings) (assoc :lint findings)))
+      fixed (assoc :autofix {:by "parinfer" :code fixed
+                             :message "the brackets did not balance; parinfer fixed them from the indentation and the fixed code ran"}))))
 
 (defn- attempt-checked! [{:keys [op code remove]} t0 parsed]
   (let [removals (mapv symbol remove)]
@@ -328,7 +342,9 @@
          "develop_form, and retry. This is not Common Lisp: there are no restarts. Results are EDN.\n"
          "clj-kondo checks every form before it runs: errors (unresolved symbols, wrong arity) come back as "
          ":status :rejected :reason :lint with :lint findings ({:row :col :message}, rows within your code); "
-         "warnings come back as :lint on an accepted result.\n"
+         "warnings come back as :lint on an accepted result. "
+         "Code whose brackets do not balance is fixed by parinfer from its indentation and run; the result then has "
+         ":autofix {:code} with the code that ran: check it is what you meant.\n"
          "Put side effects in execute_form, not develop_form (develop forms are replayed on restore). "
          "Do not use ns, in-ns or require; these aliases are always loaded: "
          (str/join ", " (map (fn [[lib _ a]] (str a " (" lib ")")) sys/world-requires)) ".\n"
@@ -341,6 +357,7 @@
 ;; ---------------------------------------------------------------- commands
 
 (defn- show-result [r]
+  (when (:autofix r) (println (ui/yellow "auto-fixed: parinfer balanced the brackets")))
   (case (:status r)
     :accepted (do (println (ui/green (str "accepted: revision " (:revision r)))
                            (ui/dim (str (:op r) " " (:ms r) " ms"
