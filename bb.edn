@@ -1,5 +1,6 @@
 {:paths ["src" "test" "ci"]
- :deps {de.timokramer/charm.clj {:mvn/version "0.2.123"}}
+ :deps {de.timokramer/charm.clj {:mvn/version "0.2.123"}
+        parinferish/parinferish {:mvn/version "0.8.0"}}
  :tasks
  {test  {:doc  "Run the bba tests (offline, fake provider)"
          :task (let [tests '[bba-test codex-test md-test providers-test tui-test ucii-check-test world-test

@@ -278,12 +278,35 @@
 
 (deftest reader-errors-and-namespace-switches
   (let [cwd (temp-cwd) _ (start cwd)]
-    (let [r (develop "(defn broken [")]
-      (is (= "reader" (:class r)))
+    (let [r (develop "(defn broken [] \"abc")]
+      (is (= "reader" (:class r)) "an unterminated string is beyond parinfer")
+      (is (nil? (:autofix r)))
       (is (str/includes? (:message r) "line 1")))
     (is (= "reader" (:class (develop "(in-ns 'other)"))))
     (is (= "nothing to evaluate" (:message (develop "  ;; just a comment"))))
     (is (empty? (revs cwd)))))
+
+(deftest unbalanced-brackets-are-auto-fixed
+  (let [cwd (temp-cwd) _ (start cwd)]
+    (testing "develop: missing closing parens"
+      (let [r (develop "(defn add [a b]\n  (+ a b)")]
+        (is (= :accepted (:status r)))
+        (is (= "(defn add [a b]\n  (+ a b))" (get-in r [:autofix :code])))
+        (is (= 5 (call 'add 2 3)))
+        (is (= "(defn add [a b]\n  (+ a b))" (-> (world/catalogue) first :source)) "the fixed source is logged")))
+    (testing "execute: extra and wrong closers"
+      (let [r (execute "(let [x (add 1 2)\n  (* x 10)))")]
+        (is (= :accepted (:status r)))
+        (is (= "30" (:value r)))
+        (is (= "parinfer" (get-in r [:autofix :by])))))
+    (testing "balanced code is never touched"
+      (is (nil? (:autofix (execute "(add 1 1)")))))
+    (testing "a repaired form that fails still restores and says it was fixed"
+      (let [r (develop "(def boom (Integer/parseInt \"x\")")]
+        (is (= :error (:status r)))
+        (is (some? (:autofix r)))
+        (is (nil? (ns-resolve 'world 'boom)))))
+    (is (= [1 2 3] (revs cwd)) "two accepted attempts, the failed one publishes nothing")))
 
 (deftest multi-form-develop-is-all-or-nothing
   (let [cwd (temp-cwd) _ (start cwd)

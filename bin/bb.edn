@@ -1,2 +1,3 @@
 {:paths ["../src"]
- :deps {de.timokramer/charm.clj {:mvn/version "0.2.123"}}}
+ :deps {de.timokramer/charm.clj {:mvn/version "0.2.123"}
+        parinferish/parinferish {:mvn/version "0.8.0"}}}
