@@ -338,10 +338,9 @@ bba also adds `AGENTS.md` from `~/.bba/` and from your project to the model's in
 
 WARNING: bba has no sandbox. Code in the world runs with your user rights. It can read, change and delete any file that you can, and it can run any command.
 
-- Do not start bba in a folder that you do not trust. At start, bba runs that folder's extensions, its `world.edn` checks and its saved revisions. `--no-extensions` stops only the user and project extensions.
-- Read files that the model writes to `.bba/extensions/` before you type `/reload`.
 - A `:tool-call` guard is a check, not a sandbox. The `block_rm_rf.clj` example looks for the text `rm -rf` only.
 - The Jev guardrail is on by default. It sends the name and the input of every tool call to ollama.com (or to the `BBA_GUARDRAIL_PROVIDER` that you set). A tool call is blocked when the classifier does not answer. Set `BBA_GUARDRAIL_ENABLED=false` to stop this traffic and this blocking.
+- Read files that the model writes to `.bba/extensions/` before you type `/reload`.
 - Session logs can contain secrets from files that the model read. bba never writes your API key.
 - bba sends your conversation and world data only to the provider that you select.
 
