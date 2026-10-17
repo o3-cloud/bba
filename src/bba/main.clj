@@ -114,21 +114,27 @@
 
 (defn- tool-shower
   "The :show handler for a terminal: each call is one collapsed line whose label
-  links to a file with its full detail, and each finished call is added to
-  (:calls ctx) for Ctrl-O. `enter!` opens a tool block, after a blank line when
-  the last block was not one."
+  links to a file with its full detail, `:guardrail` events print the Jev verdict and
+  the prompt sent to Jev, and each finished call is added to (:calls ctx) for Ctrl-O.
+  `enter!` opens a tool block, after a blank line when the last block was not one."
   [ctx live out enter!]
   (let [pending (atom nil)
         width (or (get-in ctx [:md :width]) (tui/width))]
-    (fn [{:keys [phase tool input content error?]}]
+    (fn [{:keys [phase tool input content error? blocked] :as ev}]
       (when @live
         ((:flush out))
-        (if (= phase :call)
+        (cond
+          (= phase :guardrail)
+          (do (ui/log! (toolview/guardrail-str ev width))
+              (when blocked (ui/stop!)))
+
+          (= phase :call)
           (let [f (detail-file ctx tool)]
             (enter! :tool)
             (reset! pending f)
             (ui/log! (toolview/call-str tool input width (some->> f (str "file://"))))
             (ui/start! (str "running " tool "...")))
+          :else
           (let [d (toolview/detail-md tool input content)]
             (when-let [f @pending]
               (try (fs/create-dirs (fs/parent f)) (spit f d)

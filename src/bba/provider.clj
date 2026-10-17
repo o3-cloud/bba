@@ -247,6 +247,17 @@
         (responses/reply-of-stream
          (post-stream http-req #(responses/chunk-step %1 %2 on-text) responses/stream-init))))))
 
+(defn systemone
+  "Return a provider fn for OpenRouter's TypeSafe Decisions API."
+  [env]
+  (fn [{:keys [state questions]}]
+    (post-json {:uri (str (base-url env "openrouter") "/systemone")
+                :headers {"Authorization" (str "Bearer " (get env "OPENROUTER_API_KEY"))
+                          "Content-Type" "application/json"}
+                :body {:model (or (get env "BBA_GUARDRAIL_MODEL") "jev-1.14")
+                       :state state
+                       :questions questions}})))
+
 (defn openai [env] (chat-completions "openai" env))
 (defn ollama [env] (chat-completions "ollama" env))
 (defn openrouter [env] (chat-completions "openrouter" env))

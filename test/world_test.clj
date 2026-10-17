@@ -75,7 +75,10 @@
         code (binding [*out* out *err* err]
                (when provider (ext/set-provider! (:fn provider)))
                (main/run {:args args :cwd cwd
-                          :env (merge {"BBA_HOME" (str (fs/path (fs/parent cwd) "home"))} env)
+                          ;; The guardrail is on by default; these tests have no Jev, so
+                          ;; they turn it off and keep the tool-call path deterministic.
+                          :env (merge {"BBA_HOME" (str (fs/path (fs/parent cwd) "home"))
+                                       "BBA_GUARDRAIL_ENABLED" "false"} env)
                           :in (java.io.BufferedReader. (java.io.StringReader. (or input "")))}))]
     {:code code :out (str out) :err (str err)}))
 
