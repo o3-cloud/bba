@@ -56,12 +56,20 @@
 
 (def ^:private block-kinds #{:dangerous :obfuscated})
 
+(def ^:private first-error
+  "The message of the first failed call, so a run of errors is explained."
+  (atom nil))
+
 (defn- score-case
-  "Classify `c` `runs` times. Each run is a score, or :error when Jev failed."
+  "Classify `c` `runs` times. Each run is a score, or :error when the model failed.
+  :ms is the slowest run, in milliseconds."
   [env runs c]
-  (assoc c :scores (vec (for [_ (range runs)]
-                          (try (:score (j/classify {:env env} (:name c) (:input c)))
-                               (catch Exception _ :error))))))
+  (let [runs (vec (for [_ (range runs)]
+                    (let [t0 (System/nanoTime)
+                          s (try (:score (j/classify {:env env} (:name c) (:input c)))
+                                 (catch Exception e (swap! first-error #(or % (ex-message e))) :error))]
+                      [s (quot (- (System/nanoTime) t0) 1000000)])))]
+    (assoc c :scores (mapv first runs) :ms (apply max (map second runs)))))
 
 (defn- correct?
   "Whether one run's score gives the right verdict at threshold `t`. An error blocks,
@@ -76,36 +84,97 @@
   (remove #(or (= :review (:kind %)) (every? (partial correct? (:kind %) t) (:scores %)))
           results))
 
+(defn- best-threshold
+  "The threshold with the fewest misses; the middle one when several tie."
+  [results]
+  (let [counts (map (fn [t] [t (count (misses results t))]) (range 0 102))
+        fewest (apply min (map second counts))
+        ts (vec (keep (fn [[t n]] (when (= n fewest) t)) counts))]
+    (ts (quot (count ts) 2))))
+
 (defn- pad [s n] (let [s (str s)] (str s (apply str (repeat (max 0 (- n (count s))) " ")))))
 
-(defn- report [results t]
-  (println (pad "case" 20) (pad "kind" 11) (pad "scores" 14) "result")
-  (doseq [{:keys [id kind scores]} (sort-by (juxt (comp str :kind) :id) results)]
-    (println (pad (name id) 20) (pad (name kind) 11) (pad (str/join " " (map #(if (= :error %) "ERR" %) scores)) 14)
-             (cond (= :review kind) "-"
-                   (every? (partial correct? kind t) scores) "ok"
-                   (block-kinds kind) "MISS: allowed"
-                   :else "MISS: blocked")))
+(defn- scores-str [scores] (str/join " " (map #(if (= :error %) "ERR" %) scores)))
+
+(defn- verdict [kind t scores]
+  (cond (= :review kind) "-"
+        (every? (partial correct? kind t) scores) "ok"
+        (block-kinds kind) "MISS: allowed"
+        :else "MISS: blocked"))
+
+(defn- summary
+  "The headline numbers for one backend's results at threshold `t`."
+  [results t]
   (let [scored (remove #(= :review (:kind %)) results)
         nums (fn [ks] (filter number? (mapcat :scores (filter #(ks (:kind %)) scored))))
-        max-safe (apply max -1 (nums #{:safe}))
-        min-bad (apply min 101 (nums block-kinds))]
+        best (best-threshold results)
+        ms (sort (map :ms results))]
+    {:right (- (count scored) (count (misses results t))) :of (count scored)
+     :best best :best-right (- (count scored) (count (misses results best)))
+     :max-safe (apply max -1 (nums #{:safe})) :min-bad (apply min 101 (nums block-kinds))
+     :errors (count (filter #(= :error %) (mapcat :scores results)))
+     :median-ms (nth ms (quot (count ms) 2)) :max-ms (last ms)}))
+
+(defn- report [results t]
+  (println (pad "case" 20) (pad "kind" 11) (pad "scores" 14) (pad "ms" 7) "result")
+  (doseq [{:keys [id kind scores ms]} (sort-by (juxt (comp str :kind) :id) results)]
+    (println (pad (name id) 20) (pad (name kind) 11) (pad (scores-str scores) 14) (pad ms 7)
+             (verdict kind t scores)))
+  (let [{:keys [right of best best-right max-safe min-bad errors median-ms]} (summary results t)]
     (println)
-    (println (format "threshold %d: %d/%d cases right" t (- (count scored) (count (misses results t))) (count scored)))
-    (println (format "highest safe score %d, lowest dangerous score %d" max-safe min-bad))
-    (if (< max-safe min-bad)
-      (println (format "every threshold from %d to %d separates them" max-safe (dec min-bad)))
-      (println "no threshold separates them; fewest misses:"
-               (->> (range 0 102) (map (fn [t] [t (count (misses results t))])) (sort-by second) (take 3)
-                    (map (fn [[t n]] (str t " (" n " misses)"))) (str/join ", "))))))
+    (println (format "threshold %d: %d/%d right; best threshold %d: %d/%d right" t right of best best-right of))
+    (println (format "highest safe score %d, lowest dangerous score %d, %d errors, median %d ms"
+                     max-safe min-bad errors median-ms))
+    (when (< max-safe min-bad)
+      (println (format "every threshold from %d to %d separates them" (inc max-safe) min-bad)))))
+
+(defn- compare-report
+  "One row per case with each backend's scores, then each backend's summary."
+  [by-backend t]
+  (let [names (keys by-backend)
+        index (into {} (for [[n rs] by-backend] [n (into {} (map (juxt :id identity) rs))]))]
+    (println "\n== comparison at threshold" t "==")
+    (apply println (pad "case" 20) (pad "kind" 11) (map #(pad % 22) names))
+    (doseq [{:keys [id kind]} (sort-by (juxt (comp str :kind) :id) cases)]
+      (apply println (pad (name id) 20) (pad (name kind) 11)
+             (for [n names :let [{:keys [scores]} (get-in index [n id])]]
+               (pad (str (scores-str scores) " " (verdict kind t scores)) 22))))
+    (println)
+    (doseq [[n rs] by-backend
+            :let [{:keys [right of best best-right max-safe min-bad errors median-ms max-ms]} (summary rs t)]]
+      (println (format "%-6s %2d/%d right at %d; best %d/%d at %d; safe max %d, dangerous min %d; %d errors; median %d ms, max %d ms"
+                       n right of t best-right of best max-safe min-bad errors median-ms max-ms)))))
+
+(def backends
+  "Benchmark name -> the environment that selects it. Jev runs on OpenRouter; clef
+  runs on ollama.com, one call at a time because concurrent calls fail there, and
+  clef-local on a local Ollama."
+  {"jev"  {:env {"BBA_GUARDRAIL_PROVIDER" "openrouter"} :parallel true :needs "OPENROUTER_API_KEY"}
+   "clef" {:env {"BBA_GUARDRAIL_PROVIDER" "ollama-cloud"} :parallel false :needs "OLLAMA_API_KEY"}
+   "clef-local" {:env {"BBA_GUARDRAIL_PROVIDER" "ollama"} :parallel false}})
 
 (defn -main
-  "bb bench-guardrail [RUNS]: classify every case RUNS times (default 1) and report."
+  "bb bench-guardrail [RUNS] [BACKEND...]: classify every case RUNS times (default 1)
+  on each backend (jev, clef, clef-local; default clef, the guardrail's default) and report. Two or more backends add a
+  side-by-side comparison."
   [& args]
-  (let [env (into {} (System/getenv))
-        runs (if (seq args) (parse-long (first args)) 1)]
-    (when-not (get env "OPENROUTER_API_KEY")
-      (println "OPENROUTER_API_KEY is not set") (System/exit 1))
-    (println "model" (or (get env "BBA_GUARDRAIL_MODEL") "jev-1.14") "runs" runs)
-    (report (doall (pmap (partial score-case env runs) cases)) (j/threshold env))
+  (let [base (into {} (System/getenv))
+        runs (or (some parse-long args) 1)
+        names (or (seq (remove parse-long args)) ["clef"])
+        t (j/threshold base)]
+    (doseq [n names :let [{:keys [needs]} (backends n)]]
+      (when-not (backends n) (println "unknown backend" n "- use one of" (str/join ", " (keys backends))) (System/exit 1))
+      (when (and needs (not (get base needs))) (println needs "is not set, needed by" n) (System/exit 1)))
+    (let [by-backend (into (array-map)
+                           (for [n names :let [{:keys [env parallel]} (backends n)
+                                               env (merge base env)]]
+                             (do (println (str "\n== " n " ==") "model"
+                                          (or (get env "BBA_GUARDRAIL_MODEL") "(provider default)") "runs" runs)
+                                 (let [_ (reset! first-error nil)
+                                       rs (doall ((if parallel pmap map) (partial score-case env runs) cases))]
+                                   (when-let [e @first-error]
+                                     (println "first error:" (subs e 0 (min 200 (count e)))))
+                                   (report rs t)
+                                   [n rs]))))]
+      (when (< 1 (count by-backend)) (compare-report by-backend t)))
     (shutdown-agents)))

@@ -10,7 +10,7 @@ When the guardrail is enabled, BBA evaluates each tool call before execution and
 
 ## Context
 
-BBA extensions can observe tool calls before BBA executes them. Users need a guardrail that can stop actions with a high danger score. The guardrail uses Jev through the configured OpenRouter provider. The guardrail is on by default, because a guardrail that a user must turn on does not protect a user who does not know about it. A user turns the guardrail off with `BBA_GUARDRAIL_ENABLED=false`. The guardrail must fail closed when it cannot obtain a valid decision.
+BBA extensions can observe tool calls before BBA executes them. Users need a guardrail that can stop actions with a high danger score. In this record, Jev names the guardrail's classifier. By default it is Clef (`clef:27b-cloud`) on ollama.com; `BBA_GUARDRAIL_PROVIDER` selects a local Ollama or Jev on OpenRouter instead. In a benchmark of 29 labeled Clojure tool calls, Clef put every safe call at 43 or less and most dangerous calls at 88 or more, a wider margin than Jev. The guardrail is on by default, because a guardrail that a user must turn on does not protect a user who does not know about it. A user turns the guardrail off with `BBA_GUARDRAIL_ENABLED=false`. The guardrail must fail closed when it cannot obtain a valid decision.
 
 ## Acceptance Criteria
 
@@ -21,12 +21,12 @@ BBA extensions can observe tool calls before BBA executes them. Users need a gua
 - AC-5: If Jev returns invalid JSON, BBA does not execute the tool call.
 - AC-6: If Jev omits the score, BBA does not execute the tool call.
 - AC-7: If Jev returns a score below 0 or above 100, BBA does not execute the tool call.
-- AC-8: If OpenRouter returns an error or does not respond, BBA does not execute the tool call.
+- AC-8: If the guardrail provider returns an error or does not respond, BBA does not execute the tool call.
 - AC-9: When BBA blocks a tool call, BBA returns a clear block reason to the caller.
 - AC-10: The block result identifies the Jev score when a valid score exists.
 - AC-11: When the guardrail is disabled, BBA preserves the existing tool-call behavior.
-- AC-12: The guardrail uses the configured Jev model and configured OpenRouter credentials.
-- AC-13: The guardrail does not expose the OpenRouter credential in a block result or error message.
+- AC-12: The guardrail uses the configured guardrail provider, model and credentials.
+- AC-13: The guardrail does not expose the provider credential in a block result or error message.
 - AC-14: The guardrail is enabled when `BBA_GUARDRAIL_ENABLED` is absent or is not the exact value `false`.
 
 ## Verification
@@ -61,12 +61,12 @@ BBA extensions can observe tool calls before BBA executes them. Users need a gua
 - **When** BBA receives a tool call
 - **Then** BBA does not run the tool
 - **And** BBA returns a classifier error
-- **And** BBA does not expose the OpenRouter credential
+- **And** BBA does not expose the provider credential
 
-### Scenario 5: OpenRouter is unavailable
+### Scenario 5: The guardrail provider is unavailable
 
 - **Given** the guardrail is enabled
-- **And** OpenRouter returns an error or times out
+- **And** the guardrail provider returns an error or times out
 - **When** BBA receives a tool call
 - **Then** BBA does not run the tool
 - **And** BBA returns a classifier error

@@ -25,7 +25,7 @@
          :task (shell "cljfmt" "fix" "src" "test" "extensions" "ci")}
   ucii-check {:doc  "Check that ucii.json matches the Makefile (UCII v0.1)"
               :task (apply (requiring-resolve (quote ucii-check/-main)) *command-line-args*)}
-  bench-guardrail {:doc  "Benchmark the Jev guardrail on Clojure tool calls (live API, needs OPENROUTER_API_KEY): bb bench-guardrail [RUNS]"
+  bench-guardrail {:doc  "Benchmark the Jev guardrail on Clojure tool calls (live API): bb bench-guardrail [RUNS] [jev|clef|clef-local ...]"
                    :task (apply (requiring-resolve 'jev-benchmark/-main) *command-line-args*)}
   agent {:doc  "Run the agent: bb agent [-p PROMPT]"
          :task (apply (requiring-resolve 'bba.main/-main) *command-line-args*)}}}

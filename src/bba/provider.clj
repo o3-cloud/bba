@@ -247,16 +247,31 @@
         (responses/reply-of-stream
          (post-stream http-req #(responses/chunk-step %1 %2 on-text) responses/stream-init))))))
 
+(def ^:private systemone-backends
+  "BBA_GUARDRAIL_PROVIDER -> where the System One decisions API lives and its default
+  model. ollama-cloud (Clef) is the default. OpenRouter serves Jev. Ollama serves decision models such as Clef, locally or on
+  ollama.com: the local daemon will not forward System One calls to a cloud model, so
+  ollama-cloud calls ollama.com itself."
+  {"openrouter" {:path "/systemone" :model "jev-1.14" :key "OPENROUTER_API_KEY"}
+   "ollama"     {:path "/v1/systemone" :model "clef"}
+   "ollama-cloud" {:path "/v1/systemone" :model "clef:27b-cloud" :key "OLLAMA_API_KEY"
+                   :url "https://ollama.com"}})
+
 (defn systemone
-  "Return a provider fn for OpenRouter's TypeSafe Decisions API."
+  "Return a provider fn for the System One decisions API, chosen by
+  BBA_GUARDRAIL_PROVIDER: Clef on ollama.com by default, a local Ollama, or Jev on
+  OpenRouter."
   [env]
-  (fn [{:keys [state questions]}]
-    (post-json {:uri (str (base-url env "openrouter") "/systemone")
-                :headers {"Authorization" (str "Bearer " (get env "OPENROUTER_API_KEY"))
-                          "Content-Type" "application/json"}
-                :body {:model (or (get env "BBA_GUARDRAIL_MODEL") "jev-1.14")
-                       :state state
-                       :questions questions}})))
+  (let [n (or (not-empty (get env "BBA_GUARDRAIL_PROVIDER")) "ollama-cloud")
+        {:keys [path model key url]} (or (systemone-backends n)
+                                         (throw (ex-info (str "unknown guardrail provider " n) {})))]
+    (fn [{:keys [state questions]}]
+      (post-json {:uri (str (or url (base-url env n)) path)
+                  :headers (cond-> {"Content-Type" "application/json"}
+                             key (assoc "Authorization" (str "Bearer " (get env key))))
+                  :body {:model (or (not-empty (get env "BBA_GUARDRAIL_MODEL")) model)
+                         :state state
+                         :questions questions}}))))
 
 (defn openai [env] (chat-completions "openai" env))
 (defn ollama [env] (chat-completions "ollama" env))

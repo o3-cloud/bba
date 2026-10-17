@@ -3,6 +3,8 @@
   transcript block. The guardrail ships as a core extension file, not as a
   classpath namespace, so the tests load that file directly."
   (:require [babashka.fs :as fs]
+            [babashka.http-client]
+            [cheshire.core]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [bba.ext :as ext]
@@ -170,3 +172,30 @@
   (testing "a missing reason and source still render"
     (let [s (toolview/guardrail-str {:tool "shell" :score 100 :blocked true} 40)]
       (is (str/includes? s "no reason")))))
+
+(deftest the-default-provider-is-clef-on-ollama-cloud
+  (let [sent (atom nil)
+        post (fn [uri opts] (reset! sent (assoc opts :uri uri))
+               {:status 200 :body "{\"answers\":{\"score\":{\"type\":\"noul\",\"noul\":0.1}}}"})
+        send! (fn [env] (with-redefs [babashka.http-client/post post]
+                          ((provider/systemone env) {:state "s" :questions {}})
+                          (update @sent :body cheshire.core/parse-string true)))]
+    (testing "with no provider set, the guardrail calls Clef on ollama.com with the Ollama key"
+      (let [r (send! {"OLLAMA_API_KEY" "k"})]
+        (is (= "https://ollama.com/v1/systemone" (:uri r)))
+        (is (= "clef:27b-cloud" (get-in r [:body :model])))
+        (is (= "Bearer k" (get-in r [:headers "Authorization"])))))
+    (testing "BBA_GUARDRAIL_PROVIDER=openrouter selects Jev"
+      (let [r (send! {"BBA_GUARDRAIL_PROVIDER" "openrouter" "OPENROUTER_API_KEY" "k"})]
+        (is (str/ends-with? (:uri r) "/systemone"))
+        (is (str/includes? (:uri r) "openrouter.ai"))
+        (is (= "jev-1.14" (get-in r [:body :model])))))
+    (testing "a local Ollama needs no key"
+      (let [r (send! {"BBA_GUARDRAIL_PROVIDER" "ollama"})]
+        (is (str/starts-with? (:uri r) "http://localhost:11434"))
+        (is (= "clef" (get-in r [:body :model])))
+        (is (nil? (get-in r [:headers "Authorization"])))))
+    (testing "BBA_GUARDRAIL_MODEL overrides the default model"
+      (is (= "clef:27b" (get-in (send! {"BBA_GUARDRAIL_MODEL" "clef:27b"}) [:body :model]))))
+    (testing "an unknown provider fails, so the guardrail fails closed"
+      (is (thrown? Exception (provider/systemone {"BBA_GUARDRAIL_PROVIDER" "nope"}))))))

@@ -46,7 +46,8 @@
        "Tool name: " name "\nTool input: " (json/generate-string input)))
 
 (defn classify
-  "Call Jev's System One API and return a validated 0 to 100 decision."
+  "Call the System One API (Clef on ollama.com unless BBA_GUARDRAIL_PROVIDER says
+  otherwise) and return a validated 0 to 100 decision."
   [{:keys [env]} name input]
   (let [call (or (ns-resolve 'bba.provider 'systemone)
                  (fn [e]
@@ -61,7 +62,8 @@
                        (json/parse-string (:body response) true)
                        (throw (ex-info (str "API error " (:status response)) {:status (:status response)}))))))
         factory (if (var? call) @call call)
-        call (factory (assoc env "BBA_GUARDRAIL_MODEL" (or (get env "BBA_GUARDRAIL_MODEL") "jev-1.14")))
+        ;; provider/systemone picks the backend and its default model.
+        call (factory env)
         reply (call {:state (prompt name input)
                      :questions {"score" {:type "noul"
                                           :instructions "How dangerous is this tool call? Return 0 for safe and 1 for extremely dangerous."}}})

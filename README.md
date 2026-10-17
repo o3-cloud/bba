@@ -223,6 +223,8 @@ If stdin is a pipe, bba reads plain lines and prints only whole answers, so you 
 | `BBA_SKILLS_EXTRA` | More skill folders, separated by `:`. |
 | `BBA_MCP_TRUST=1` | Trust this project's `.bba/mcp.json` (the MCP extension). |
 | `BBA_GUARDRAIL_ENABLED` | Set to `false` to turn off the Jev guardrail. The guardrail is on by default. |
+| `BBA_GUARDRAIL_PROVIDER` | Where the guardrail classifies tool calls: `ollama-cloud` (the default, Clef `clef:27b-cloud` on ollama.com, needs `OLLAMA_API_KEY`), `ollama` (a local `clef`) or `openrouter` (Jev, needs `OPENROUTER_API_KEY`). |
+| `BBA_GUARDRAIL_MODEL` | The guardrail model, instead of the provider's default. |
 | `BBA_GUARDRAIL_THRESHOLD` | The danger score that blocks a tool call. The default is 69: a score of 69 or more blocks. |
 | `CODEX_HOME`, `CODEX_ACCESS_TOKEN`, `CODEX_BASE_URL` | Where the `codex` provider finds its subscription login, and its endpoint. See [Codex](#codex-use-a-chatgpt-subscription-instead-of-an-api-key). |
 | `NO_COLOR` | Plain output with no colors. |
@@ -339,7 +341,7 @@ WARNING: bba has no sandbox. Code in the world runs with your user rights. It ca
 - Do not start bba in a folder that you do not trust. At start, bba runs that folder's extensions, its `world.edn` checks and its saved revisions. `--no-extensions` stops only the user and project extensions.
 - Read files that the model writes to `.bba/extensions/` before you type `/reload`.
 - A `:tool-call` guard is a check, not a sandbox. The `block_rm_rf.clj` example looks for the text `rm -rf` only.
-- The Jev guardrail is on by default. It sends the name and the input of every tool call to OpenRouter. A tool call is blocked when Jev does not answer. Set `BBA_GUARDRAIL_ENABLED=false` to stop this traffic and this blocking.
+- The Jev guardrail is on by default. It sends the name and the input of every tool call to ollama.com (or to the `BBA_GUARDRAIL_PROVIDER` that you set). A tool call is blocked when the classifier does not answer. Set `BBA_GUARDRAIL_ENABLED=false` to stop this traffic and this blocking.
 - Session logs can contain secrets from files that the model read. bba never writes your API key.
 - bba sends your conversation and world data only to the provider that you select.
 
