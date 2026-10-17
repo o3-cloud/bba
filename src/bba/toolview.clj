@@ -125,3 +125,32 @@
 
       error? (str pre (ui/red (str "✗ " (clip content room))))
       :else (str pre (ui/dim (str (count content) " chars"))))))
+
+(def ^:private guardrail-source-lines
+  "The most lines of the Jev prompt the transcript shows, so one huge tool input
+  cannot flood the display."
+  12)
+
+(defn- guardrail-head
+  "The one-line verdict of a Jev classification, clipped to `width`."
+  [{:keys [tool score dangerous blocked]} width]
+  (clip (str (ui/cyan "Jev guardrail") " " tool " score=" score
+             " dangerous=" dangerous " blocked=" blocked)
+        width))
+
+(defn guardrail-str
+  "What the transcript shows for one Jev classification. An allowed call is one line:
+  the verdict and the Jev reason. A blocked call adds the reason on its own line and
+  the exact prompt sent to Jev, with every line clipped to `width` and at most 12
+  lines shown, so a huge tool input cannot flood the transcript."
+  [{:keys [reason source] :as ev} width]
+  (let [lines (str/split-lines (str source))
+        shown (map #(clip % width) (take guardrail-source-lines lines))
+        more (- (count lines) guardrail-source-lines)]
+    (if-not (:blocked ev)
+      (clip (str (guardrail-head ev width) (when reason (str ": " reason))) width)
+      (str (guardrail-head ev width)
+           "\n" (clip (str (or reason "no reason")) width)
+           "\n" (ui/dim "Source sent to Jev:")
+           (when (seq shown) (str "\n" (str/join "\n" shown)))
+           (when (pos? more) (str "\n" (ui/dim (str "… " more " more lines"))))))))

@@ -275,7 +275,10 @@
         fake (fn [req] (swap! reqs conj req) {:role "assistant" :content [{:type "text" :text "ok"}]})
         run #(binding [*out* (java.io.StringWriter.) *err* (java.io.StringWriter.)]
                (ext/set-provider! fake)
-               (main/run {:args % :cwd dir :env {"BBA_HOME" (str dir "/home")} :in nil}))]
+               (main/run {:args % :cwd dir
+                          ;; The guardrail is on by default; this test has no Jev.
+                          :env {"BBA_HOME" (str dir "/home") "BBA_GUARDRAIL_ENABLED" "false"}
+                          :in nil}))]
     (try
       (is (= 0 (run ["-p" "first"])))
       (is (= 0 (run ["-c" "-p" "second"])))

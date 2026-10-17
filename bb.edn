@@ -4,7 +4,7 @@
  :tasks
  {test  {:doc  "Run the bba tests (offline, fake provider)"
          :task (let [tests '[bba-test codex-test md-test providers-test tui-test ucii-check-test world-test
-                                  review-regression-test]
+                                  review-regression-test jev-guardrail-test jev-evaluation-test]
                      _ (apply require 'clojure.test tests)
                      {:keys [fail error]} (apply (resolve 'clojure.test/run-tests) tests)]
                  (when (pos? (+ fail error)) (System/exit 1)))}
@@ -25,5 +25,7 @@
          :task (shell "cljfmt" "fix" "src" "test" "extensions" "ci")}
   ucii-check {:doc  "Check that ucii.json matches the Makefile (UCII v0.1)"
               :task (apply (requiring-resolve (quote ucii-check/-main)) *command-line-args*)}
+  bench-guardrail {:doc  "Benchmark the Jev guardrail on Clojure tool calls (live API, needs OPENROUTER_API_KEY): bb bench-guardrail [RUNS]"
+                   :task (apply (requiring-resolve 'jev-benchmark/-main) *command-line-args*)}
   agent {:doc  "Run the agent: bb agent [-p PROMPT]"
          :task (apply (requiring-resolve 'bba.main/-main) *command-line-args*)}}}
