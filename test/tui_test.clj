@@ -1,6 +1,7 @@
 (ns tui-test
   "Line editor, charm bridge, streaming folds, session resume and cancel. No terminal needed."
   (:require [babashka.fs :as fs]
+            [charm.style.core :as charm]
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
@@ -104,6 +105,45 @@
       (is (= "› a\n  b" (str/replace v #"\u001b\[[0-9;]*m" "")) "the text and indent are kept")))
   (testing "a cancelled entry has no caret and no bold"
     (is (= "› ab" (tui/view-str "› " "› " {:buf "ab" :pos 1 :done [:cancel]})))))
+
+(deftest view-wraps-the-buffer-to-the-screen
+  (let [plain (fn [v] (str/replace v #"\u001b\[[0-9;]*m" ""))
+        wide? (fn [v w] (every? #(<= (charm/string-width %) w) (str/split-lines v)))]
+    (testing "a row too long for the screen flows onto the next row"
+      (let [v (tui/view-str "› " "› " {:buf (apply str (repeat 30 "x")) :pos 30} 20)]
+        (is (= 2 (count (str/split-lines v))))
+        (is (= (str "› " (apply str (repeat 18 "x")) "\n  " (apply str (repeat 12 "x")) " ")
+               (plain v))
+            "the continuation is indented by the plain prompt, and the caret follows the text")
+        (is (wide? v 20) "no row is wider than the screen")))
+    (testing "a break lands at a blank, so a word stays whole"
+      (let [v (tui/view-str "› " "› " {:buf "hello world this" :pos 16} 14)]
+        (is (= "› hello\n  world this " (plain v)))
+        (is (wide? v 14)))
+      (let [v (tui/view-str "› " "› " {:buf "hello world this" :pos 16} 12)]
+        (is (= "› hello\n  world this" (plain v)) "the row after the break fills the screen")
+        (is (wide? v 12)))
+      (let [v (tui/view-str "› " "› " {:buf "hello world this" :pos 16} 11)]
+        (is (= "› hello\n  world\n  this " (plain v)) "the space of the break leaves the layout")
+        (is (wide? v 11))))
+    (testing "a word wider than the whole row is cut at the last cell that fits"
+      (let [v (tui/view-str "› " "› " {:buf (apply str (repeat 20 "y")) :pos 20} 8)]
+        (is (= ["› yyyyyy" "  yyyyyy" "  yyyyyy" "  yy "] (str/split-lines (plain v))))
+        (is (wide? v 8))))
+    (testing "the caret covers the character it stands on, so the row keeps its width"
+      (let [v (tui/view-str "› " "› " {:buf "abcdefghijklmnopqrst" :pos 0} 10)]
+        (is (wide? v 10))
+        (is (str/starts-with? (plain v) "› a"))))
+    (testing "a caret at the end of a full row covers the last character"
+      (let [v (tui/view-str "› " "› " {:buf (apply str (repeat 30 "x")) :pos 18} 20)]
+        (is (= 2 (count (str/split-lines v))) "18 characters fill the first row")
+        (is (wide? v 20) "the caret cannot push the row over the screen"))
+      (let [v (tui/view-str "› " "› " {:buf "ab" :pos 2} 20)]
+        (is (= "› ab " (plain v)) "with room, the caret sits in the cell after the text")))
+    (testing "a finished entry is not wrapped, and keeps no caret"
+      (let [v (tui/view-str "› " "› " {:buf (apply str (repeat 30 "z")) :pos 30 :done [:submit (apply str (repeat 30 "z"))]} 20)]
+        (is (= 1 (count (str/split-lines v))))
+        (is (not (str/includes? v "\u001b[7m")))))))
 
 (deftest turn-rule-closes-a-turn
   (is (= "── 2 tools · 3s ────" (toolview/turn-rule {:tools 2 :millis 3400} 20)) "the rule fills the width")

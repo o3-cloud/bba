@@ -1,7 +1,8 @@
 (ns bba.tui
   "The interactive line editor, built on charm.clj. Key presses arrive as charm
   messages; charm message -> edit state is pure (`press->key`, `handle-key`), and so
-  is the rendered frame (`view-str`). charm owns raw mode, wrapping and redrawing."
+  is the rendered frame (`view-str`), which wraps the buffer itself, because charm
+  renders a row it is given exactly as it comes. charm owns raw mode and redrawing."
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
             [cheshire.core :as json]
@@ -103,8 +104,9 @@
                         (< pos (count buf)) (delete-range st pos (inc pos))
                         :else st)
       st)))
-;; Layout is charm's job now: `view-str` renders one frame, and charm wraps, diffs and
-;; redraws it. The old hand-rolled `display`/`cursor-at` column arithmetic is gone.
+;; Layout is charm's job now: `view-str` renders one frame -- wrapped to the screen
+;; width, since charm renders a row as it comes -- and charm diffs and redraws it. The
+;; old hand-rolled `display`/`cursor-at` column arithmetic is gone.
 ;; ---------------------------------------------------------------- charm bridge
 
 (def ^:private named-keys
@@ -141,42 +143,166 @@
 (def ^:private caret-style (style/style :reverse true))
 (def ^:private submitted-style (style/style :bold true))
 
+(defn- graphemes
+  "The grapheme clusters of `s` as a vector, so a row break never splits one."
+  [s]
+  (vec (re-seq #"\X" (str s))))
+
+(defn- cell-width
+  "The display width of one grapheme in terminal cells. A printable ASCII grapheme
+  measures one cell without a call into JLine, which matters because a frame wraps the
+  whole buffer."
+  [g]
+  (if (re-matches #"[\x20-\x7e]" g) 1 (style/string-width g)))
+
+(defn- row-ranges
+  "Grapheme ranges [start end] of `gs` as display rows, one or more for each line: a
+  newline ends a row, and a row holds at most `cap` display cells. A break lands at
+  the blank run nearest the right edge that still fits, and the next row starts at the
+  first character after that run, so the space of a break leaves the layout. A word
+  wider than a whole row is cut at the last cell that fits, so a long path or URL
+  wraps like any other word. A nil `cap` keeps every line whole.
+
+  No range holds a newline. An empty line gets an empty range, and a buffer that ends
+  in a newline gets one after it, so the caret has a row to sit on."
+  [gs cap]
+  (let [n (count gs)
+        nl? (fn [j] (= "\n" (nth gs j)))
+        line-end (fn [i] (loop [j i] (if (or (>= j n) (nl? j)) j (recur (inc j)))))
+        row-end (fn [i]
+                  (loop [j i w 0 run nil]
+                    (if (or (>= j n) (nl? j))
+                      j
+                      (let [gw (cell-width (nth gs j))]
+                        (cond
+                          (<= (+ w gw) cap)
+                          (recur (inc j) (+ w gw) (if (str/blank? (nth gs j)) (or run j) run))
+                          (and run (> run i)) run
+                          (> j i) j
+                          :else (inc j))))))
+        skip (fn [i] (loop [j i] (if (and (< j n) (not (nl? j)) (str/blank? (nth gs j)))
+                                   (recur (inc j)) j)))]
+    (loop [i 0 rows [] line-start? true]
+      (let [i (if line-start? i (skip i))]
+        (if (>= i n)
+          (cond
+            (empty? rows) [[0 0]]
+            (nl? (dec n)) (conj rows [n n])
+            :else rows)
+          (let [end (if (nil? cap) (line-end i) (row-end i))
+                nl? (and (< end n) (= "\n" (nth gs end)))]
+            (recur (if nl? (inc end) end) (conj rows [i end]) nl?)))))))
+
+(defn- caret-index
+  "The grapheme index of `gs` that shows the caret for string index `pos`: the
+  grapheme the caret covers, or the grapheme count when the caret is past the end.
+
+  The result can be the grapheme count, which no row holds: a caret past the end of
+  the buffer stands in the cell after the text, and `row-str` draws it there."
+  [gs pos]
+  (loop [i 0 off 0]
+    (if (>= i (count gs))
+      i
+      (let [off' (+ off (count (nth gs i)))]
+        (if (< pos off') i (recur (inc i) off'))))))
+
+(defn- caret-row
+  "The index in `rows` of the row that draws the caret for grapheme `c`: the row
+  whose text the caret stands on, the empty row that starts at `c`, or the last row
+  that starts before it -- which is where a caret past the end of the buffer goes."
+  [rows c]
+  (or (first (keep-indexed (fn [i [a b]] (when (and (<= a c) (< c b)) i)) rows))
+      (first (keep-indexed (fn [i [a _]] (when (= a c) i)) rows))
+      (last (keep-indexed (fn [i [a _]] (when (< a c) i)) rows))))
+
+(defn- row-width
+  "The display width of the row `[a b]` of `gs` in terminal cells."
+  [gs [a b]]
+  (reduce + 0 (map #(cell-width (nth gs %)) (range a b))))
+
+(defn- row-str
+  "One frame row as text: `gs` from `a` to `b`, with the reverse-video caret for
+  grapheme `c`. The caret covers the cell of the character it stands on, so it never
+  widens the row -- which matters because charm cuts a row wider than the screen. A
+  caret past the row's text stands in the cell after it when that cell leaves the row
+  inside the screen, which is what `trail?` says; when it does not, the caret covers
+  the last character of the row rather than fall off the edge."
+  [gs a b c trail?]
+  (let [text (apply str (subvec gs a b))
+        k (when c (- c a))
+        cover (fn [i] (str (apply str (subvec gs a i))
+                           (style/render caret-style (nth gs i))
+                           (apply str (subvec gs (inc i) b))))]
+    (cond
+      (nil? c) text
+      (< k (- b a)) (cover (+ a k))
+      (and trail? (<= k (- b a))) (str text (style/render caret-style " "))
+      (pos? (- b a)) (cover (dec b))
+      :else (style/render caret-style " "))))
+
 (defn view-str
-  "Pure: the charm view for one frame -- the shown prompt, the buffer with a blank
-  continuation prefix on every newline, and a reverse-video caret at the cursor (a
-  space when the cursor is past the end). `plain` is the prompt without styling: its
-  width, not the shown prompt's, decides the continuation indent, so ANSI escapes in
-  the styled prompt cannot shift the layout."
-  [plain shown {:keys [buf pos done]}]
-  (let [buf (or buf "")
-        pos (or pos 0)
-        cur (if (< pos (count buf)) (subs buf pos (inc pos)) " ")
-        marked (if done
-                 ;; the last frame stays in the transcript: no caret, and a sent
-                 ;; entry in bold, so it reads as the user's message
-                 (if (= :submit (first done))
-                   (str/join "\n" (map #(style/render submitted-style %) (str/split buf #"\n" -1)))
-                   buf)
-                 (str (subs buf 0 pos) (style/render caret-style cur)
-                      (subs buf (min (inc pos) (count buf)))))
-        blank (apply str (repeat (count plain) " "))]
-    (str shown (str/replace marked "\n" (str "\n" blank)))))
+  "Pure: the charm view for one frame -- the shown prompt, the buffer wrapped to rows
+  of at most the terminal `:width` display cells, a continuation prefix of blanks as
+  wide as the plain prompt on every row after the first, and a reverse-video caret at
+  the cursor (a space when the cursor is past the end of a row). `plain` is the prompt
+  without styling: its width, not the shown prompt's, decides both the continuation
+  indent and the wrap width, so ANSI escapes in the styled prompt cannot shift the
+  layout. A finished entry keeps no caret, and a sent one is bold.
+
+  The view wraps the buffer itself instead of letting the terminal do it, because
+  charm cuts every row to the screen width: a row this view does not break loses its
+  tail instead of flowing onto the next line.
+
+  A finished entry is not wrapped: a transcript keeps what the user typed."
+  ([plain shown st] (view-str plain shown st (:width st)))
+  ([plain shown {:keys [buf pos done]} width]
+   (let [buf (or buf "")
+         pos (or pos 0)
+         gs (graphemes buf)
+         cont (apply str (repeat (count plain) " "))
+         ;; the width of the plain prompt sets the indent, the wrap width of every row
+         ;; after the first, and the cell the caret needs on the last row
+         usable (max 1 (- (or width 80) (count plain)))
+         ;; a finished entry is kept as it was typed, the way a transcript keeps it
+         rows (row-ranges gs (when-not done usable))
+         ;; the caret is drawn on the character it stands on, so the row keeps its
+         ;; width and the cursor column follows the text
+         c (when-not done (caret-index gs pos))
+         crow (when c (caret-row rows c))
+         trail? (and c (= crow (dec (count rows)))
+                     (< (row-width gs (last rows)) (dec usable)))
+         ;; the last frame stays in the transcript: no caret, and a sent entry is
+         ;; bold, so it reads as the user's message
+         body (map-indexed
+               (fn [i [a b]]
+                 (let [text (if done
+                              (if (= :submit (first done))
+                                (style/render submitted-style (apply str (subvec gs a b)))
+                                (apply str (subvec gs a b)))
+                              (row-str gs a b (when (= i crow) c) trail?))]
+                   (str (if (zero? i) shown (str cont)) text)))
+               rows)]
+     (str/join "\n" body))))
 
 ;; ---------------------------------------------------------------- read loop
 
 (defn- entry-update
-  "One charm message -> [state cmd]. Sets :done on the state when the entry finishes."
+  "One charm message -> [state cmd]. Sets :done on the state when the entry finishes.
+  A window size message is kept on the state, because the frame wraps the buffer to
+  the terminal width and charm renders the first frame before it handles one."
   [st m]
-  (cond
-    (msg/paste? m) [(handle-key st [:insert (str/replace (str (:text m)) "\r\n" "\n")]) nil]
-    :else
-    (if-let [k (press->key m)]
-      (let [st' (handle-key st k)]
-        (if (:done st')
-          ;; park the caret at the end for the final frame, then stop the loop
-          [(assoc st' :pos (count (str (:buf st')))) program/quit-cmd]
-          [st' nil]))
-      [st nil])))
+  (if (msg/window-size? m)
+    [(assoc st :width (:width m)) nil]
+    (cond
+      (msg/paste? m) [(handle-key st [:insert (str/replace (str (:text m)) "\r\n" "\n")]) nil]
+      :else
+      (if-let [k (press->key m)]
+        (let [st' (handle-key st k)]
+          (if (:done st')
+            ;; park the caret at the end for the final frame, then stop the loop
+            [(assoc st' :pos (count (str (:buf st')))) program/quit-cmd]
+            [st' nil]))
+        [st nil]))))
 
 (defn read-line!
   "Read one entry with editing. Returns the text, nil on EOF, or :cancel on Ctrl-C at
@@ -185,9 +311,10 @@
   [{:keys [prompt shown-prompt hist history-file]}]
   (let [plain (or prompt "> ")
         shown (or shown-prompt plain)
-        res (program/run {:init (new-state @hist)
+        screen (width)
+        res (program/run {:init (assoc (new-state @hist) :width screen)
                           :update entry-update
-                          :view (partial view-str plain shown)
+                          :view (fn [st] (view-str plain shown st (:width st screen)))
                           :ctrl-c :message
                           :bracketed-paste true
                           ;; pinned: the background query runs at every prompt, and
