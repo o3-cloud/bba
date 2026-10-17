@@ -46,14 +46,24 @@ The command is `bba`, so it does not hide the babashka `bb` command.
    If you already use the Codex CLI, you can skip the key and bill a ChatGPT
    subscription instead: `bba --provider codex`. See [Codex](#codex-use-a-chatgpt-subscription-instead-of-an-api-key).
 
-4. Start bba in a project folder:
+4. The [Jev guardrail](#core-extensions) checks each tool call before it runs, and it
+   is on by default. It needs an [ollama.com](https://ollama.com) key. Without one,
+   it blocks every tool call:
+
+   ```bash
+   export OLLAMA_API_KEY=...
+   # or, to run with no guardrail:
+   export BBA_GUARDRAIL_ENABLED=false
+   ```
+
+5. Start bba in a project folder:
 
    ```bash
    cd my-project
    bba
    ```
 
-5. Ask for something:
+6. Ask for something:
 
    ```
    › How many lines are in notes.txt? Then make a function line-count for it.
@@ -156,13 +166,13 @@ NOTE: An invariant about a function that you have not built yet shows a warning 
 | `/reload` | Load new or changed extensions. Unload hooks run first. |
 | `/skills`, `/mcp`, `/compact` | From the core extensions. See [Core extensions](#core-extensions). |
 | `/new` | Start a new session: a new log file and an empty conversation. The world stays. |
-| `/clear`, `/help`, `/quit` | Clear the screen, list the commands, leave. |
+| `/clear`, `/help`, `/quit` (or `/exit`) | Clear the screen, list the commands, leave. |
 
 ## Keys
 
 | Key | What it does |
 |---|---|
-| Enter | Send. |
+| Enter | Send. A long entry wraps at the screen width, at a space when it can. |
 | `\` then Enter, or Alt+Enter | Start a new line. Pasted text keeps its line breaks. |
 | ↑ ↓ | Go through your history. bba saves it in `~/.bba/history`. |
 | ← → Home End, Ctrl-A, Ctrl-E | Move the cursor. |
@@ -323,6 +333,17 @@ bba also adds `AGENTS.md` from `~/.bba/` and from your project to the model's in
 
 `/compact` shows the state. `/compact on`, `/compact off` and `/compact model PROVIDER [MODEL]` change it for this session. If the summary fails, bba sends the whole conversation.
 
+**Jev guardrail** (`jev-guardrail.clj`). Checks each tool call before it runs. bba sends the tool name and input to a decision model, which gives a danger score from 0 to 100. A score of 69 or more blocks the call, and the model gets the score as the reason. The guardrail fails closed: when the classifier gives an error or invalid data, bba blocks the call. The transcript shows one line for each check. A blocked call also shows the prompt that bba sent.
+
+| Setting | Default |
+|---|---|
+| `BBA_GUARDRAIL_ENABLED` | on; only `false` turns it off |
+| `BBA_GUARDRAIL_PROVIDER` | `ollama-cloud`: Clef (`clef:27b-cloud`) on ollama.com, with `OLLAMA_API_KEY`. `ollama` uses a local `clef`. `openrouter` uses Jev (`jev-1.14`), with `OPENROUTER_API_KEY`. |
+| `BBA_GUARDRAIL_MODEL` | the provider's model |
+| `BBA_GUARDRAIL_THRESHOLD` | `69`: the lowest score that blocks |
+
+The guardrail is a classifier, not a sandbox. In the benchmark (`bb bench-guardrail`), Clef allowed an `rm -rf` built from a reversed string and a write that emptied `~/.zshrc`. [BDR-001](docs/bdr/001-jev-guardrail-blocks-dangerous-tool-calls.md) records the behavior.
+
 ## Files that bba makes
 
 | Path | Contents | In git? |
@@ -342,7 +363,7 @@ WARNING: bba has no sandbox. Code in the world runs with your user rights. It ca
 - The Jev guardrail is on by default. It sends the name and the input of every tool call to ollama.com (or to the `BBA_GUARDRAIL_PROVIDER` that you set). A tool call is blocked when the classifier does not answer. Set `BBA_GUARDRAIL_ENABLED=false` to stop this traffic and this blocking.
 - Read files that the model writes to `.bba/extensions/` before you type `/reload`.
 - Session logs can contain secrets from files that the model read. bba never writes your API key.
-- bba sends your conversation and world data only to the provider that you select.
+- bba sends your conversation and world data only to the provider that you select, and the name and input of each tool call to the guardrail provider.
 
 ## Limits
 
@@ -370,6 +391,10 @@ Make is the single entry point for these operations. It follows the
 fails when `ucii.json` and the `Makefile` disagree. Call the Make targets, not the
 `bb` tasks behind them, so people, agents and CI run the same commands.
 
+One task is outside UCII because it calls live APIs and costs money:
+`bb bench-guardrail [RUNS] [clef|jev|clef-local ...]` scores 33 labeled tool calls on
+each guardrail backend and compares them. Clef is the default backend.
+
 | File | Part |
 |---|---|
 | `src/bba/core.clj`, `ext.clj` | Kernel: the agent loop and the extension API. The tests keep it under 500 lines. |
@@ -377,7 +402,7 @@ fails when `ucii.json` and the `Makefile` disagree. Call the Make targets, not t
 | `src/bba/provider.clj`, `openai.clj` | Providers and streaming. |
 | `src/bba/responses.clj`, `codex_auth.clj` | The `codex` provider: Responses API translation and the ChatGPT login. |
 | `src/bba/main.clj`, `tui.clj`, `ui.clj`, `md.clj`, `toolview.clj` | Command line, the charm.clj line editor, colors and spinner, the markdown renderer, and the Ctrl-O pager view of tool calls. |
-| `extensions/` | Core extensions: skills, MCP and compaction. |
+| `extensions/` | Core extensions: skills, MCP, compaction and the Jev guardrail. |
 | `examples/` | Example extensions and an example `mcp.json`. |
 
 ## Credits
