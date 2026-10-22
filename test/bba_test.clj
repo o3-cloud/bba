@@ -8,6 +8,7 @@
             [bba.main :as main]
             [bba.provider :as provider]
             [bba.sys :as sys]
+            [bba.tui :as tui]
             [org.httpkit.server]))
 
 (def root (str (fs/parent (fs/parent (fs/absolutize *file*)))))
@@ -179,6 +180,85 @@
 
 (defn- lines-in [names] (reduce + (map #(count (str/split-lines (slurp (str (fs/path root "src" "bba" %))))) names)))
 
+(deftest prompt-footer-joins-hooks-in-given-order
+  (testing "no hook answers: no footer, so the prompter gets nil"
+    (ext/reset-extensions!)
+    (is (nil? (core/prompt-footer {:env {}}))))
+  (testing "a bare string takes the default order, a map says where its text belongs"
+    (ext/reset-extensions!)
+    (binding [ext/*source* "/x/late.clj"]
+      (ext/on! :prompt-footer (fn [_ _] {:order 20 :text "second"}))
+      (ext/on! :prompt-footer (fn [_ _] "only"))
+      (ext/on! :prompt-footer (fn [_ _] {:order 10 :text "first"})))
+    (is (= "first · second · only" (core/prompt-footer {:env {}}))
+        "an explicit order wins over the default, so the load order does not decide the row"))
+  (testing "a hook that fails open adds nothing, and a blank part is not a separator"
+    (ext/reset-extensions!)
+    (binding [*err* (java.io.StringWriter.)]
+      (binding [ext/*source* "/x/bad.clj"]
+        (ext/on! :prompt-footer (fn [_ _] (throw (Exception. "boom"))))
+        (ext/on! :prompt-footer (fn [_ _] "  "))
+        (ext/on! :prompt-footer (fn [_ _] "kept"))))
+    (is (= "kept" (core/prompt-footer {:env {}}))))
+  (testing "the folder part is the full path, and it starts the top row"
+    (ext/reset-extensions!)
+    (let [{:keys [cwd home]} (temp-dirs)
+          ctx {:cwd cwd :home home :env {"BBA_PROVIDER" "anthropic"}}]
+      (core/load-extensions! ctx :core-only?)
+      (let [[top bottom] (core/prompt-footer ctx)]
+        (is (string? top) "no world: the target and the context share one row, and no row is empty")
+        (is (str/starts-with? top (:cwd ctx))
+            "the path starts the top row, so a narrow terminal cuts the end of the row below, not the folder")
+        (is (str/includes? bottom "anthropic")))))
+  (testing "the world shares the top row with the folder, and the target is below it"
+    (ext/reset-extensions!)
+    (let [{:keys [cwd home]} (temp-dirs)
+          ctx {:cwd cwd :home home :world "tmp-1a2b" :env {"BBA_PROVIDER" "anthropic"}}]
+      (core/load-extensions! ctx :core-only?)
+      (let [[top bottom] (core/prompt-footer ctx)]
+        (is (= [cwd "tmp-1a2b"] (str/split top #" · "))
+            "the folder first, then the world, on the top row")
+        (is (str/includes? bottom "anthropic") "the target is on the row below"))))
+  (testing "a ctx with no folder and no world keeps one plain row"
+    (ext/reset-extensions!)
+    (core/load-extensions! {:cwd "" :home "/h" :env {"BBA_PROVIDER" "anthropic"}} :core-only?)
+    (let [foot (core/prompt-footer {:cwd "" :env {"BBA_PROVIDER" "anthropic"}})]
+      (is (string? foot) "one row returns a string, not a vector of one row")
+      (is (not (str/starts-with? foot " · ")) "no empty part, so no leading separator")))
+  (testing "a ctx with no world adds no world part, and keeps the top row valid"
+    (ext/reset-extensions!)
+    (let [{:keys [cwd home]} (temp-dirs)
+          ctx {:cwd cwd :home home :world "" :env {"BBA_PROVIDER" "anthropic"}}]
+      (core/load-extensions! ctx :core-only?)
+      (let [[top _] (core/prompt-footer ctx)]
+        (is (= [cwd] (str/split top #" · "))
+            "no empty part, so no double separator")))))
+
+(deftest prompt-footer-follows-the-live-provider
+  ;; line-reader is private; the test drives it directly so the wiring is checked, not
+  ;; only the pieces
+  (let [{:keys [cwd home]} (temp-dirs)
+        ctx {:cwd cwd :home home :tty? true :env {"BBA_PROVIDER" "anthropic"}}
+        seen (atom nil)]
+    (core/load-extensions! ctx)
+    (let [foot-of (fn [ctx]
+                    (with-redefs [tui/read-line! (fn [opts] (reset! seen opts) nil)]
+                      ((#'bba.main/line-reader ctx nil) ctx))
+                    (:footer @seen))
+          rows (fn [ctx] (let [f ((foot-of ctx))] (if (string? f) [f] f)))]
+      (let [foot (foot-of ctx)]
+        (is (fn? foot) "a fn, so /model can change it between prompts")
+        (is (vector? (foot)) "two rows: the folder and the world, then the target")
+        (is (= 2 (count (foot))) "one row for the folder and the world, one for the target"))
+      (is (str/includes? (second (rows ctx)) "anthropic · claude-opus-5-5"))
+      (is (str/starts-with? (first (rows ctx)) cwd) "the wiring puts the full path first")
+      (is (str/includes? (str/join (rows (assoc ctx :env {"BBA_PROVIDER" "openai"}))) "openai")
+          "a new ctx gets a new footer, so /provider shows at the next prompt")
+      (is (str/includes? (str/join (rows (assoc ctx :world "tmp-9f8e"))) "tmp-9f8e")
+          "a new ctx gets a new footer, so /world shows at the next prompt")
+      (is (str/includes? (first (rows (assoc ctx :world "tmp-9f8e"))) "tmp-9f8e")
+          "the world shares the top row with the folder"))))
+
 (deftest ac7-core-size
   (let [all (map (comp str fs/file-name) (fs/glob (fs/path root "src" "bba") "*.clj"))
         kernel (lines-in kernel-files)]
@@ -250,6 +330,34 @@
     (binding [*err* (java.io.StringWriter.)] (core/load-extensions! ctx))
     (is (nil? (ext/tool "reverse")))
     (is (ext/tool "execute_form") "built-ins survive reload")))
+
+(deftest the-namespace-order-puts-a-namespace-after-what-it-requires
+  ;; A small copy of the src/ layout: a leaf, a namespace that requires it, then a
+  ;; namespace that requires both. The order must follow those requires.
+  (let [tmp (str (fs/create-temp-dir {:prefix "bba-order"}))
+        _ (swap! created conj tmp)
+        _ (fs/create-dirs (fs/path tmp "bba"))
+        put! (fn [name s] (spit (str (fs/path tmp "bba" name)) s))]
+    (put! "a_leaf.clj" "(ns bba.a-leaf)\n")
+    (put! "core.clj"
+          "(ns bba.core\n  (:require [babashka.fs :as fs]\n            [bba.ext :as ext]\n            [bba.provider :as provider]))\n")
+    (put! "main.clj"
+          "(ns bba.main\n  (:require [bba.core :as core]\n            [bba.a-leaf :as leaf]))\n")
+    (is (= '[bba.a-leaf bba.core bba.main]
+           (core/core-namespace-order :dir tmp))
+        "a namespace comes after every namespace that it requires")))
+
+(deftest reload-source-gives-the-image-a-new-core-function
+  ;; /reload reloads the source as well as the extensions. Without that, an extension
+  ;; that calls a function added by this build fails until the user restarts bba.
+  (is (some? (resolve 'bba.toolview/fit)) "the function exists at the start")
+  (let [tv (find-ns 'bba.toolview)]
+    (ns-unmap tv 'fit)
+    (is (nil? (resolve 'bba.toolview/fit)) "the ns no longer defines it")
+    (binding [*err* (java.io.StringWriter.)]
+      (core/reload-source!))
+    (is (some? (resolve 'bba.toolview/fit)) "a source reload defines it again")
+    (is (= "abc" ((resolve 'bba.toolview/fit) "abc" 10)) "and the reloaded function works")))
 
 (deftest unload-hooks-run-on-reload-and-drop-broken-files
   ;; Core extensions such as mcp.clj register unloaders of their own, so these

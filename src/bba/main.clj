@@ -177,7 +177,7 @@
     (some-> (:calls ctx) (reset! []))
     (core/log-message! ctx umsg)
     (try
-      (let [{:keys [status text messages usage]} (core/run-turns ctx (conj messages umsg))]
+      (let [{:keys [status text messages usage last-usage]} (core/run-turns ctx (conj messages umsg))]
         (ui/stop!)
         (if (and out @(:streamed? out))
           ((:flush out))
@@ -185,11 +185,19 @@
               (println (md/render (or (:md ctx) (md/context {:width (tui/width)})) text))))
         (when out
           (enter! :end)
-          (println (toolview/turn-rule {:tools (count (some-> (:calls ctx) deref))
-                                        :millis (- (System/currentTimeMillis) t0)
-                                        :usage usage
-                                        :cost (when usage (provider/usage-cost (:env ctx) usage))}
-                                       (or (get-in ctx [:md :width]) (tui/width)))))
+          (let [width (or (get-in ctx [:md :width]) (tui/width))
+                facts {:tools (count (some-> (:calls ctx) deref))
+                       :millis (- (System/currentTimeMillis) t0)
+                       :status status
+                       :usage usage
+                       :last-usage last-usage
+                       :messages messages
+                       :request (core/prompt-request ctx messages)
+                       :width width
+                       :cost (when usage (provider/usage-cost (:env ctx) usage))}
+                rule (or (some :turn-rule (ext/emit-results :turn-stop facts ctx))
+                         (toolview/turn-rule facts width))]
+            (println (toolview/fit rule width))))
         [status messages])
       (finally (ui/stop!)))))
 
@@ -288,9 +296,13 @@
 (defn- builtin-commands
   "Each fn takes [ctx args] and returns the ctx to use next."
   []
-  {"reload" (fn [ctx _] (core/load-extensions! ctx)
+  {"reload" (fn [ctx _]
+              ;; the source first: an extension may call a core function that this build
+              ;; added, and only a fresh namespace definition has that function
+              ((requiring-resolve 'bba.core/reload-source!))
+              ((requiring-resolve 'bba.core/load-extensions!) ctx)
               ;; extensions were dropped and reloaded: let them re-initialize
-              (ext/emit :session-start {} ctx)
+              ((requiring-resolve 'bba.ext/emit) :session-start {} ctx)
               (println (str "reloaded: " (count (ext/tools)) " tools, "
                             (count (ext/commands)) " commands"))
               ctx)
@@ -318,15 +330,26 @@
 
 ;; ---------------------------------------------------------------- interactive
 
+(defn- dim-footer
+  "Dim one footer row, or each row of a multi-row footer. core/prompt-footer returns a
+  string for one row and a vector for two or more rows, so both shapes are dimmed here."
+  [f]
+  (if (string? f) (ui/dim f) (mapv ui/dim f)))
+
 (defn- line-reader
-  "Returns a fn that reads one entry: text, nil at EOF, or :cancel (Ctrl-C at an empty prompt).
-  On a terminal it uses the line editor; otherwise it reads plain lines."
+  "Returns a fn of the live ctx that reads one entry: text, nil at EOF, or :cancel (Ctrl-C
+  at an empty prompt). On a terminal it uses the line editor, with the :prompt-footer hooks
+  as dim status rows under the entry; otherwise it reads plain lines."
   [ctx ^java.io.BufferedReader in]
   (if (:tty? ctx)
     (let [file (str (fs/path (:home ctx) "history"))
           hist (atom (tui/load-history file))]
-      #(tui/read-line! {:prompt "› " :shown-prompt (ui/cyan "› ") :hist hist :history-file file}))
-    #(do (print "› ") (flush) (.readLine in))))
+      (fn [ctx]
+        (tui/read-line! {:prompt "› " :shown-prompt (ui/cyan "› ")
+                         :hist hist :history-file file
+                         ;; a fn, not a string: /provider, /model and /world change it between prompts
+                         :footer #(some-> (core/prompt-footer ctx) dim-footer)})))
+    (fn [_] (print "› ") (flush) (.readLine in))))
 
 (defn interactive
   ([ctx in] (interactive ctx in []))
@@ -337,7 +360,7 @@
    (println (ui/dim (str (help-text) (when (:tty? ctx) " | Enter sends, \\ or Alt+Enter = new line, Ctrl-O shows tool calls, Ctrl-C stops"))))
    (let [read-entry (line-reader ctx in)]
      (loop [ctx (assoc ctx :calls (atom [])) messages messages]
-       (let [line (read-entry)]
+       (let [line (read-entry ctx)]
          (cond
            (nil? line) 0
            (= :cancel line) (do (println (ui/dim "(Ctrl-D or /quit to exit)")) (recur ctx messages))

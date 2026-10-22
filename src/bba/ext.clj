@@ -37,10 +37,16 @@
   (put! :commands "command" name {:name name :handler handler}))
 
 (defn on!
-  "Add an event hook. Events: :session-start, :tool-call, :request.
+  "Add an event hook. Events: :session-start, :tool-call, :request, :turn-stop,
+  :prompt-footer.
   A :tool-call hook gets {:name :input} and may return {:block true :reason s}.
   A :request hook gets {:request req} with the live ctx and may return
-  {:request req'} to transform what is sent to the provider (compaction, redaction)."
+  {:request req'} to transform what is sent to the provider (compaction, redaction).
+  A :turn-stop hook gets {:usage :last-usage :tools :millis :status} and may return
+  {:turn-rule s} to replace the dim rule that closes the turn.
+  A :prompt-footer hook gets the live ctx and may return a string, or
+  {:order n :text s}, for one part of the dim row under the input. core joins the
+  parts of all such hooks, ordered by :order and not by the order of the files."
   [event handler]
   (swap! registry update-in [:hooks event] (fnil conj []) {:handler handler :source *source*}))
 
@@ -63,13 +69,25 @@
 (defn hooks [event] (get-in @registry [:hooks event]))
 (defn provider [] (get-in @registry [:provider :fn]))
 
-(defn emit
-  "Run every hook for a non-guard event. Hook errors warn and are ignored (fail-open).
-  A hook runs as its own file, so what it registers is removed on /reload."
+(defn emit-results
+  "Run every hook for a non-guard event and return their results, without nil.
+  Hook errors warn and are ignored (fail-open). A :turn-stop hook uses this to
+  report the rule it wants."
   [event payload ctx]
-  (doseq [{:keys [handler source]} (hooks event)]
-    (try (binding [*source* source] (handler payload ctx))
-         (catch Exception e (warn "hook " event " in " source " failed: " (ex-message e))))))
+  (keep (fn [{:keys [handler source]}]
+          (try (binding [*source* source] (handler payload ctx))
+               (catch Exception e
+                 (warn "hook " event " in " source " failed: " (ex-message e))
+                 nil)))
+        (hooks event)))
+
+(defn emit
+  "Run every hook for a non-guard event and return nil. Hook errors warn and are
+  ignored (fail-open). A hook runs as its own file, so what it registers is
+  removed on /reload."
+  [event payload ctx]
+  (run! identity (emit-results event payload ctx))
+  nil)
 
 (defn- builtin? [v] (= :builtin (:source v)))
 
