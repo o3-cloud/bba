@@ -4,6 +4,7 @@
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [charm.ansi.width :as width]
             [charm.components.viewport]
             [charm.message :as msg]
             [org.httpkit.server :as server]
@@ -105,6 +106,83 @@
   (testing "a cancelled entry has no caret and no bold"
     (is (= "› ab" (tui/view-str "› " "› " {:buf "ab" :pos 1 :done [:cancel]})))))
 
+(def ^:private strip-ansi #"\u001b\[[0-9;]*m")
+
+(deftest view-draws-a-footer-under-the-entry
+  (testing "the footer comes after the entry rows, on its own row"
+    (let [v (tui/view-str "› " "› " {:buf "hi" :pos 1 :footer "a · b"})]
+      (is (= "› hi\na · b" (str/replace v strip-ansi "")))))
+  (testing "several footer rows keep their order"
+    (is (= "› hi\na\nb" (str/replace (tui/view-str "› " "› " {:buf "hi" :pos 1 :footer ["a" "b"]})
+                                     strip-ansi ""))))
+  (testing "a function footer runs at each frame, so it shows what is true now"
+    (let [n (atom 0)
+          f (fn [] (str "frame " (swap! n inc)))]
+      (is (= "› hi\nframe 1" (str/replace (tui/view-str "› " "› " {:buf "hi" :pos 1 :footer f}) strip-ansi "")))
+      (is (= "› hi\nframe 2" (str/replace (tui/view-str "› " "› " {:buf "hi" :pos 1 :footer f}) strip-ansi "")))))
+  (testing "a footer that throws does not break the frame"
+    (let [v (tui/view-str "› " "› " {:buf "hi" :pos 1 :footer (fn [] (throw (Exception. "boom")))})]
+      (is (= "› hi" (str/replace v strip-ansi "")))))
+  (testing "a long footer is cut to the width, so it cannot wrap"
+    (let [v (str/replace (tui/view-str "› " "› " {:buf "hi" :pos 1 :footer "abcdefghij" :width 6})
+                         strip-ansi "")]
+      (is (= "› hi\nabcde…" v))))
+  (testing "a sent entry leaves no footer: the transcript takes over"
+    (is (= "› hi" (str/replace (tui/view-str "› " "› " {:buf "hi" :pos 2 :done [:cancel] :footer "x"})
+                               strip-ansi ""))))
+  (testing "a blank footer is not a row"
+    (is (= "› hi" (str/replace (tui/view-str "› " "› " {:buf "hi" :pos 1 :footer "   "})
+                               strip-ansi "")))))
+
+(deftest row-ranges-wrap-words
+  (testing "a row breaks at a space, so a word stays whole"
+    (is (= [[0 5] [6 11]] (tui/row-ranges "hello world" 5)))
+    (is (= [[0 3] [4 11]] (tui/row-ranges "aaa bbb ccc" 7))))
+  (testing "a word wider than a row is cut at the last cell that fits"
+    (is (= [[0 4] [4 8] [8 10]] (tui/row-ranges "abcdefghij" 4))))
+  (testing "the ranges are ordered, and only the space each break spent is left out"
+    (doseq [line ["" "ab" "a b c" "one two three four" "  lead" "trail  "]
+            avail [1 3 7 80]]
+      (let [rs (tui/row-ranges line avail)
+            kept (reduce + (map (fn [[s e]] (- e s)) rs))
+            spaces (count (filter #{\space} line))]
+        (is (apply <= (mapcat identity rs)) (str line " at " avail " is ordered"))
+        (is (<= (- (count line) spaces) kept (count line))
+            (str line " at " avail " keeps every non-space character"))))))
+
+(deftest view-wraps-a-long-entry
+  (testing "a long entry wraps and keeps its continuation indent"
+    (let [v (str/replace (tui/view-str "› " "› " {:buf "the quick brown fox" :pos 0
+                                                  :done [:cancel] :width 20})
+                         #"\u001b\[[0-9;]*m" "")]
+      (is (= "› the quick brown\n  fox" v) "each row after the first is indented by the prompt")))
+  (testing "no row of a long entry is wider than the terminal"
+    (let [buf "alpha beta gamma delta epsilon zeta eta theta"
+          v (str/replace (tui/view-str "› " "› " {:buf buf :pos (count buf) :width 16})
+                         #"\u001b\[[0-9;]*m" "")]
+      (is (every? #(<= (width/string-width %) 16) (str/split-lines v))
+          "every row fits the width")))
+  (testing "a wide character counts two cells"
+    (is (= 2 (width/string-width "你")))
+    (is (= [[0 1] [1 2] [2 3]] (tui/row-ranges "你你你" 2))
+        "a two-cell character takes a whole row of two cells")))
+
+(deftest view-caret-stays-on-screen
+  (testing "the caret is on the row it belongs to"
+    (let [v (tui/view-str "› " "› " {:buf "hello world" :pos 8 :width 10})]
+      (is (str/includes? v "\u001b[7mr") "the caret is on the r of world")))
+  (testing "a caret at the end of a full row gets a row of its own"
+    (let [v (str/replace (tui/view-str "› " "› " {:buf "abcdefghijklmnop" :pos 16 :width 10})
+                         #"\u001b\[[0-9;]*m" "")]
+      (is (= 3 (count (str/split-lines v))) "two data rows and one caret row")
+      (is (str/ends-with? v "  ") "the caret row is only the blank continuation")))
+  (testing "a newline and a wrap indent the same"
+    (let [plain (fn [buf pos width]
+                  (str/replace (tui/view-str "› " "› " {:buf buf :pos pos :done [:cancel] :width width})
+                               #"\u001b\[[0-9;]*m" ""))]
+      (is (= "› ab\n  cd" (plain "ab\ncd" 5 20)))
+      (is (= "› ab\n  cd" (plain "ab cd" 5 5)) "a wrap reads like a newline"))))
+
 (deftest turn-rule-closes-a-turn
   (is (= "── 2 tools · 3s ────" (toolview/turn-rule {:tools 2 :millis 3400} 20)) "the rule fills the width")
   (is (= "── 1 tool · 0s " (toolview/turn-rule {:tools 1 :millis 100} 5)) "one tool, and no line when the label is wider")
@@ -116,6 +194,34 @@
   (is (= "── 999 in · 0 out · $0 · 1s "
          (toolview/turn-rule {:tools 0 :millis 1000 :usage {:input 999 :output 0} :cost 0} 10))
       "a free model shows $0; no cost hides the cost"))
+
+(deftest a-turn-rule-with-colour-still-fits
+  ;; The rule is dim, so it carries escape sequences. An escape costs no cell: a rule
+  ;; cut by character count would be too short on screen and would drop its reset.
+  (reset! ui/on true)
+  (try
+    (let [rule (toolview/turn-rule {:tools 3 :millis 8000
+                                    :usage {:input 12345 :output 900} :cost 0.04} 60)]
+      (is (= 60 (width/string-width rule)) "the styled rule fills 60 cells")
+      (is (< 60 (count rule)) "it is longer than 60 characters, because of the escapes")
+      (is (= rule (toolview/fit rule 60)) "a rule that fits is unchanged")
+      (doseq [cells [40 20 10 1]]
+        (let [out (toolview/fit rule cells)]
+          (is (= cells (width/string-width out))
+              (str "a cut rule keeps " cells " cells"))
+          (is (str/ends-with? out "…") "a cut rule ends with an ellipsis")
+          (is (str/includes? out "\u001b[0m")
+              "a cut rule closes the style, so the terminal does not stay dim"))))
+    (finally (reset! ui/on false))))
+
+(deftest fit-keeps-one-line-and-never-splits-a-wide-character
+  (is (= "abc" (toolview/fit "abc" 10)) "a short rule is unchanged")
+  (is (= "abcd…" (toolview/fit "abcdefghij" 5)) "a long rule is cut to the width")
+  (is (= "…" (toolview/fit "abc" 1)) "one cell holds the ellipsis")
+  (is (= "…" (toolview/fit "abc" 0)) "a width below one cell still gives the ellipsis")
+  (is (= "a b" (toolview/fit "a\nb" 10)) "a newline becomes a space, so the rule is one line")
+  (is (= "日…" (toolview/fit "日本語" 3)) "a wide character is never split")
+  (is (= "日…" (toolview/fit "日本語" 4)) "the cut keeps whole wide characters, and the ellipsis needs a cell"))
 
 ;; ---------------------------------------------------------------- tool view
 

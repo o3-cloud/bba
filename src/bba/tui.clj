@@ -54,7 +54,11 @@
 
 ;; ---------------------------------------------------------------- edit state
 
-(defn new-state [hist] {:buf "" :pos 0 :hist hist :hidx (count hist) :draft ""})
+(defn new-state
+  "Edit state for one entry. `:width` is the terminal width in cells; a
+  window-size message keeps it current, so the view wraps to the real width."
+  [hist]
+  {:buf "" :pos 0 :hist hist :hidx (count hist) :draft "" :width 80})
 
 (defn- insert [{:keys [buf pos] :as st} s]
   (assoc st :buf (str (subs buf 0 pos) s (subs buf pos)) :pos (+ pos (count s))))
@@ -141,33 +145,152 @@
 (def ^:private caret-style (style/style :reverse true))
 (def ^:private submitted-style (style/style :bold true))
 
-(defn view-str
-  "Pure: the charm view for one frame -- the shown prompt, the buffer with a blank
-  continuation prefix on every newline, and a reverse-video caret at the cursor (a
-  space when the cursor is past the end). `plain` is the prompt without styling: its
-  width, not the shown prompt's, decides the continuation indent, so ANSI escapes in
-  the styled prompt cannot shift the layout."
-  [plain shown {:keys [buf pos done]}]
-  (let [buf (or buf "")
-        pos (or pos 0)
-        cur (if (< pos (count buf)) (subs buf pos (inc pos)) " ")
-        marked (if done
-                 ;; the last frame stays in the transcript: no caret, and a sent
-                 ;; entry in bold, so it reads as the user's message
-                 (if (= :submit (first done))
-                   (str/join "\n" (map #(style/render submitted-style %) (str/split buf #"\n" -1)))
-                   buf)
-                 (str (subs buf 0 pos) (style/render caret-style cur)
-                      (subs buf (min (inc pos) (count buf)))))
-        blank (apply str (repeat (count plain) " "))]
-    (str shown (str/replace marked "\n" (str "\n" blank)))))
+;; ---------------------------------------------------------------- wrapping
 
-;; ---------------------------------------------------------------- read loop
+(defn- char-cells
+  "Display cells one character occupies, given as a one-character string.
+  Printable ASCII counts one, which keeps the scan cheap for ordinary text.
+  Anything else goes through charm, so a wide character counts two."
+  [c]
+  (if (and (= 1 (count c)) (<= 32 (int (first c)) 126)) 1 (style/string-width c)))
+
+(defn row-ranges
+  "Pure: [start end] ranges that cut `line` into rows of at most `avail` display
+  cells. The ranges are ordered and cover every character except the space a row
+  breaks at: that space is spent, so the next row starts on a word and a wrap
+  shows no gap. A row breaks after the last space that fits, so words stay whole.
+  A word wider than a whole row is cut at the last cell that fits."
+  [line avail]
+  (let [n (count line)
+        avail (max 1 (int avail))]
+    (if (zero? n)
+      [[0 0]]
+      (loop [start 0 rows []]
+        (if (>= start n)
+          rows
+          (let [end (loop [i start w 0 space nil]
+                      (if (>= i n)
+                        n  ; the rest of the line fits in this row
+                        (let [c (subs line i (inc i))
+                              w' (+ w (char-cells c))]
+                          (if (> w' avail)
+                            (cond (and space (> space start)) space
+                                  (= c " ") i
+                                  (> i start) i
+                                  :else (inc i))
+                            (recur (inc i) w' (if (= c " ") i space))))))
+                next-start (loop [j end]
+                             (if (and (< j n) (= " " (subs line j (inc j))))
+                               (recur (inc j))
+                               j))]
+            (recur next-start (conj rows [start end]))))))))
+
+(defn caret-spot
+  "Pure: where a caret at `pos` sits among `ranges`. Returns {:row i :at k :col
+  cells}: row i, character k of that row, `cells` display cells in. A `pos` on the
+  space a row broke at puts the caret at the start of the next row. Returns {:row
+  i :at k :col n :after true} when the last row is full, so the caret needs a row
+  of its own."
+  [line ranges pos avail]
+  (let [pos (max 0 (min pos (count line)))
+        rows (map-indexed (fn [i [s e]] [i s e]) ranges)
+        inside (->> rows (filter (fn [[_ s e]] (and (<= s pos) (<= pos e)))) last)
+        ahead (->> rows (filter (fn [[_ s _]] (< pos s))) first)
+        last-i (dec (count ranges))]
+    (cond
+      inside (let [[i s e] inside
+                   at (min pos e)
+                   col (style/string-width (subs line s at))]
+               (cond
+                 (< col avail) {:row i :at at :col col}
+                 (< (inc i) (count ranges)) {:row (inc i) :at 0 :col 0}
+                 :else {:row i :at at :col col :after true}))
+      ahead (let [[i] ahead] {:row i :at 0 :col 0})
+      :else (let [[s e] (ranges last-i)]
+              {:row last-i :at e :col (style/string-width (subs line s e)) :after true}))))
+
+(defn- row-text
+  "One row [s e] of `line`, as it must appear: bold when the entry is sent, with
+  the reverse-video caret where `spot` puts it, else plain. `spot` is the caret
+  spot of this line, or nil when the caret is elsewhere or the entry is finished."
+  [line [s e] i spot submitted?]
+  (let [plain (subs line s e)]
+    (cond
+      submitted? (style/render submitted-style plain)
+      (or (nil? spot) (not= i (:row spot)) (:after spot)) plain
+      :else (let [a (max s (min (:at spot) e))
+                  cur (if (< a e) (subs line a (inc a)) " ")]
+              (str (subs line s a) (style/render caret-style cur)
+                   (subs line (min (inc a) e) e))))))
+
+(defn- fit-row
+  "`s` on one row of at most `cells` display cells. A longer string is cut and given an
+  ellipsis. A cut closes the style that it interrupts, so the row does not stay dim."
+  [s cells]
+  (let [s (str/replace (str s) #"\s*\n\s*" " ")
+        budget (max 1 cells)]
+    (if (<= (style/string-width s) budget)
+      s
+      (let [[kept _] (reduce (fn [[acc used :as state] tok]
+                               (let [w (style/string-width tok)]
+                                 (if (<= (+ used w) (dec budget))
+                                   [(str acc tok) (+ used w)]
+                                   (reduced state))))
+                             ["" 0]
+                             (re-seq #"\u001b\[[0-9;]*m|\X" s))]
+        (str kept (when (re-find #"\u001b\[" kept) "\u001b[0m") "…")))))
+
+(defn view-str
+  "Pure: the charm view for one frame. The buffer is wrapped to `:width` cells
+  (default 80) less the plain prompt's width, so a long entry keeps its caret and
+  its end on screen instead of running past the terminal edge. Each row after the
+  first starts with a blank prefix as wide as the plain prompt: the plain prompt's
+  width, not the shown prompt's, decides the indent, so ANSI escapes in the styled
+  prompt cannot shift the layout. A reverse-video caret marks the cursor, and a
+  caret past the end of a full row gets a row of its own. `:footer` is a string or a
+  vector of strings: its rows come after the entry rows, each cut to the width, so a
+  dim status line can sit under the input. The last frame stays: a sent entry renders
+  in bold with no caret, so it reads as the user's message."
+  [plain shown {:keys [buf pos done width footer]}]
+  (let [buf (or buf "")
+        pos (min (or pos 0) (count buf))
+        pwidth (style/string-width plain)
+        avail (max 1 (- (or width 80) pwidth))
+        cont (apply str (repeat pwidth " "))
+        submitted? (= :submit (first done))
+        lines (str/split buf #"\n" -1)
+        starts (vec (reductions + 0 (map #(inc (count %)) lines)))
+        caret-line (->> (range (count starts))
+                        (take-while (fn [i] (<= (starts i) pos)))
+                        last)
+        rows (->> (range (count lines))
+                  (mapcat (fn [i]
+                            (let [line (lines i)
+                                  ranges (row-ranges line avail)
+                                  spot (when (and (nil? done) (= i caret-line))
+                                         (caret-spot line ranges (- pos (starts i)) avail))
+                                  out (map-indexed (fn [j r] (row-text line r j spot submitted?))
+                                                   ranges)]
+                              (if (:after spot)
+                                (conj (vec out) (style/render caret-style " "))
+                                out))))
+                  vec)]
+    (let [rows (map-indexed (fn [k r] (str (if (zero? k) shown cont) r)) rows)
+          ;; a sent or cancelled entry leaves no footer: the transcript takes over
+          live (when (nil? done)
+                 (try (if (fn? footer) (footer) footer) (catch Exception _ nil)))
+          rows' (cond-> (vec rows)
+                  (nil? done) (into (->> (if (string? live) [live] live)
+                                         (remove str/blank?)
+                                         (mapv #(fit-row % (or width 80))))))]
+      (str/join "\n" rows'))))
 
 (defn- entry-update
   "One charm message -> [state cmd]. Sets :done on the state when the entry finishes."
   [st m]
   (cond
+    ;; a resize changes the width the view wraps to, so keep it on the state
+    (msg/window-size? m) [(assoc st :width (max 1 (:width m))) nil]
     (msg/paste? m) [(handle-key st [:insert (str/replace (str (:text m)) "\r\n" "\n")]) nil]
     :else
     (if-let [k (press->key m)]
@@ -181,11 +304,12 @@
 (defn read-line!
   "Read one entry with editing. Returns the text, nil on EOF, or :cancel on Ctrl-C at
   an empty prompt. `hist` is an atom holding the history vector; entries are saved to
-  `history-file`."
-  [{:keys [prompt shown-prompt hist history-file]}]
+  `history-file`. `footer` is a string, or a function that returns one, drawn under the
+  entry. A function runs at each frame, so a status line shows what is true now."
+  [{:keys [prompt shown-prompt hist history-file footer]}]
   (let [plain (or prompt "> ")
         shown (or shown-prompt plain)
-        res (program/run {:init (new-state @hist)
+        res (program/run {:init (assoc (new-state @hist) :footer footer)
                           :update entry-update
                           :view (partial view-str plain shown)
                           :ctrl-c :message
