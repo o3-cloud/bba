@@ -4,12 +4,12 @@
  :tasks
  {test  {:doc  "Run the bba tests (offline, fake provider)"
          :task (let [tests '[bba-test codex-test md-test providers-test tui-test ucii-check-test world-test
-                                  review-regression-test jev-guardrail-test jev-evaluation-test]
+                                  review-regression-test jev-guardrail-test jev-evaluation-test context-test]
                      _ (apply require 'clojure.test tests)
                      {:keys [fail error]} (apply (resolve 'clojure.test/run-tests) tests)]
                  (when (pos? (+ fail error)) (System/exit 1)))}
-  lint  {:doc  "clj-kondo, cljfmt check, splint and carve over src, test, extensions and ci"
-         :task (let [dirs ["src" "test" "extensions" "ci"]
+  lint  {:doc  "clj-kondo, cljfmt check, splint and carve over src, test, extensions, ci, examples and bin"
+         :task (let [dirs ["src" "test" "extensions" "ci" "examples" "bin"]
                      ok? (fn [r] (zero? (:exit r)))
                      kondo (< (:exit (apply shell {:continue true} "clj-kondo" "--fail-level" "error" "--lint" dirs)) 2)
                      fmt (ok? (apply shell {:continue true} "cljfmt" "check" dirs))
@@ -21,8 +21,8 @@
                                        "-M" "-m" "carve.main" "--opts"
                                        (pr-str {:paths dirs :report {:format :text} :api-namespaces (quote [bba.ext bba.main bba.ui ucii-check])})))]
                  (when-not (and kondo fmt carve) (System/exit 1)))}
-  fmt   {:doc  "Format src, test, extensions and ci with cljfmt"
-         :task (shell "cljfmt" "fix" "src" "test" "extensions" "ci")}
+  fmt   {:doc  "Format src, test, extensions, ci, examples and bin with cljfmt"
+         :task (apply shell "cljfmt" "fix" ["src" "test" "extensions" "ci" "examples" "bin"])}
   ucii-check {:doc  "Check that ucii.json matches the Makefile (UCII v0.1)"
               :task (apply (requiring-resolve (quote ucii-check/-main)) *command-line-args*)}
   bench-guardrail {:doc  "Benchmark the Jev guardrail on Clojure tool calls (live API, needs OPENROUTER_API_KEY): bb bench-guardrail [RUNS]"

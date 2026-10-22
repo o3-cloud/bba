@@ -565,6 +565,42 @@
     (is (every? defined? '[reverse-string uppercase-string]) "default forks the current revision")
     (is (str/includes? (with-out-str (world/world-command "")) "forked from main r1"))))
 
+(deftest revisions-are-capped
+  (testing "the default keeps the newest 20"
+    (let [cwd (temp-cwd) _ (start cwd)]
+      (dotimes [i 22] (develop (str "(def v" i " " i ")")))
+      (is (= (range 3 23) (revs cwd)))))
+  (testing "a world sets its own cap; rollback reaches only kept revisions"
+    (let [cwd (temp-cwd) _ (adapter! cwd {:max-revisions 3}) _ (start cwd)]
+      (dotimes [i 5] (develop (str "(def v" i " " i ")")))
+      (is (= [3 4 5] (revs cwd)))
+      (is (= "unknown revision: 1" (:message (world/rollback! 1))))
+      (is (= 6 (:revision (world/rollback! 4))) "numbering continues after a prune")
+      (is (= [4 5 6] (revs cwd)))
+      (world/stop!) (start cwd)
+      (is (defined? 'v3))
+      (is (not (defined? 'v4)) "the world reopens from CURRENT")))
+  (testing "nil keeps every revision"
+    (let [cwd (temp-cwd) _ (adapter! cwd {:max-revisions nil}) _ (start cwd)]
+      (dotimes [i 22] (develop (str "(def v" i " " i ")")))
+      (is (= 22 (count (revs cwd))))))
+  (testing "a fork keeps revision 1, which records where it came from"
+    (let [cwd (temp-cwd) _ (adapter! cwd {:max-revisions 2}) _ (start cwd)]
+      (develop rev-src)
+      (wcmd "fork old")
+      (wcmd "old")
+      (dotimes [i 3] (develop (str "(def v" i " " i ")")))
+      (is (= [1 3 4] (store/rev-numbers (store/world-dir cwd "old"))))
+      (is (str/includes? (with-out-str (world/world-command "")) "forked from main r1")))))
+
+(deftest prune-keeps-current-below-orphans
+  (let [cwd (temp-cwd) _ (start cwd) dir (wdir cwd)]
+    (dotimes [i 4] (develop (str "(def v" i " " i ")")))
+    (spit (str (fs/path dir "CURRENT")) "000002\n")
+    (is (= [1] (store/prune! dir 2)) "the newest 2, plus CURRENT")
+    (is (= [2 3 4] (revs cwd)))
+    (is (nil? (store/prune! dir nil)))))
+
 (deftest failed-switch-keeps-the-current-world
   (let [cwd (temp-cwd) _ (start cwd) _ (develop rev-src)]
     (wcmd "new busy") (wcmd "new broken")

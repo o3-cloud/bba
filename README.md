@@ -115,7 +115,7 @@ accepted: revision 2 execute 1 ms
 - **The world is the only tool.** The model works in Clojure data: `slurp` and `spit` for files, `fs/glob` to find them, `http/get` and `json/parse-string` for web APIs. It uses `(sys/sh "cmd")` only for real external programs, such as `git` or a test runner. Every world has these aliases, and they survive restores: `str` (clojure.string), `set`, `fs` (babashka.fs), `sys`, `http` (babashka.http-client), `json` (cheshire), `csv`, `yaml`, `io`, `edn`, `walk`, `pp` (clojure.pprint) and `proc` (babashka.process). The list is `world-requires` in `src/bba/sys.clj`.
 - **Lint first.** clj-kondo checks each form before it runs, with the world's functions as context. An error, such as an unresolved symbol or a call with the wrong number of arguments, rejects the code before it is evaluated. Warnings come back as `:lint` on the result. bba loads clj-kondo as a babashka pod and downloads it once. If the pod does not load, bba shows a warning and skips the check.
 - **Checkpoints.** Each attempt starts from a checkpoint. If the attempt fails, bba restores the checkpoint and gives the error to the model. The model then fixes the code and tries again.
-- **Revisions.** Each accepted attempt becomes a revision file, and bba never changes a revision file. A `CURRENT` file points to the live revision. bba moves that pointer only after the revision file is complete, so a crash cannot leave a half-written revision as the live one.
+- **Revisions.** Each accepted attempt becomes a revision file, and bba never changes a revision file. bba keeps the newest 20 revision files (set `:max-revisions` in `world.edn`; `nil` keeps all) and deletes older ones after each new revision. A `CURRENT` file points to the live revision. bba moves that pointer only after the revision file is complete, so a crash cannot leave a half-written revision as the live one.
 - **Invariants and goals.** You write them in the world's `world.edn`. A change that breaks an invariant is rejected. Goals only show progress.
 
 ## Rules for your world
@@ -128,7 +128,8 @@ Put checks in `.bba/worlds/<name>/world.edn` (`.bba/worlds/main/world.edn` for t
  :goals      [{:name "has shout" :form (ifn? shout)}]
  :timeout-ms 3600000   ; one hour; this is the default a fresh world gets
  :max-result-chars 4000
- :lint :reject}   ; or :warn (report only) or :off
+ :lint :reject     ; or :warn (report only) or :off
+ :max-revisions 20} ; revision files kept on disk; nil keeps all
 ```
 
 If a change breaks an invariant, bba rejects the change and keeps the old version:
@@ -147,13 +148,13 @@ NOTE: An invariant about a function that you have not built yet shows a warning 
 | `/develop CODE` | Add or change definitions. `/develop -NAME` removes one. |
 | `/execute CODE` | Run code and keep the result. |
 | `/preview CODE` | Run code, show the result and keep nothing. |
-| `/rollback N` | Make a new revision with the state of revision N. History stays. |
+| `/rollback N` | Make a new revision with the state of revision N. History stays, up to `:max-revisions`. |
 | `/abort` | Report that there is nothing to abort. Ctrl-C stops a running operation. |
 | `/world [NAME \| new NAME \| fork NAME [REV] \| temp]` | List, switch, create or fork worlds, or open a temporary fork. See [Worlds](#worlds). |
 | `/functions`, `/describe NAME` | List the functions, or show one with its arguments, docstring and source. |
 | `/history`, `/status` | Show the revisions, or the state of the world and its checks. |
 | `/provider [NAME [MODEL]]`, `/model [NAME]` | Open a search list or use the supplied name. The conversation stays. |
-| `/reload` | Load new or changed extensions. Unload hooks run first. |
+| `/reload` | Reload the bba source, then load new or changed extensions. Unload hooks run first. |
 | `/skills`, `/mcp`, `/compact` | From the core extensions. See [Core extensions](#core-extensions). |
 | `/new` | Start a new session: a new log file and an empty conversation. The world stays. |
 | `/clear`, `/help`, `/quit` | Clear the screen, list the commands, leave. |
@@ -291,6 +292,12 @@ An extension is a Clojure file. bba loads extensions from three folders, in this
 ;; Run at start, on /new and after /reload:
 (ext/on! :session-start (fn [_ ctx] nil))
 
+;; Run at the end of each turn. Return {:turn-rule s} to replace the dim rule:
+(ext/on! :turn-stop (fn [facts ctx] nil))
+
+;; Add a part to the dim row under the input. Return a string, or {:order n :text s}:
+(ext/on! :prompt-footer (fn [_ ctx] {:order 10 :text "anthropic · claude-opus-5-5"}))
+
 ;; Cleanup, run when /reload drops the extensions (stop a child process, close a socket):
 (ext/on-unload! (fn [] (println "bye")))
 ```
@@ -320,6 +327,34 @@ bba also adds `AGENTS.md` from `~/.bba/` and from your project to the model's in
 ```
 
 `/compact` shows the state. `/compact on`, `/compact off` and `/compact model PROVIDER [MODEL]` change it for this session. If the summary fails, bba sends the whole conversation.
+
+**Context** (`context.clj`). Reports the context window and how full it is. `/context` shows a row for each part of the prompt: the base prompt and `AGENTS.md`, the tool specs, the message history, and the cost of the turn. The dim rule at the end of a turn shows the same share in one line, so the turn footer now ends with `ctx 12% · 240k left`.
+
+```
+› /context
+context  6.5k / 65.5k used (10%) · 59k free
+provider ollama · deepseek-v4.1-flash:cloud · window 1048576 (static table)
+prompt   1.8k  base and AGENTS.md, 7115 chars
+tools    5.9k  7 tools · activate_skill 5.7k (skills catalog) · other 209
+messages 0  0 messages · user 0 · assistant 0 · tool results 0
+turn     8.8k in (last call) · 120 out · $0.04 · 7s · 2 tools
+```
+
+The used count is the input token count that the provider reports for the last call, not an estimate. A local Ollama model gets its window from the server: bba asks `POST /api/show` one time in a session. A hosted model needs a table entry, or the variable `BBA_CONTEXT_WINDOW`, which always wins:
+
+```
+BBA_CONTEXT_WINDOW=200000 bba
+```
+
+If the window is unknown, the report shows the exact parts and a question mark in place of the share. The `on disk` row appears only when compaction sends less than the session file holds.
+
+`prompt-info.clj` and `context.clj` also put the same facts on one dim row under the input, so the folder, the world, the target and the room left are visible without a command:
+
+```
+›   /Users/owenzanzal/pai/workspace/2b/bb · tmp-22ecfa08-58c · anthropic · claude-opus-5-5 · ctx 3% · 193.4k left
+```
+
+The folder part is the full path of the working folder, and it starts the row. A narrow terminal cuts the end of the row, so the context numbers go first and the folder stays. The row comes from `:prompt-footer` hooks, ordered by each hook's `:order`: the folder is `5`, the world is `7`, the target is `10` and the context part is `20`. `/world`, `/provider` and `/model` change the row at the next prompt. bba draws no world part when the session has no world yet, and no context part before the first turn or a `/context` report, because no call has measured the prompt yet.
 
 ## Files that bba makes
 
@@ -376,7 +411,7 @@ fails when `ucii.json` and the `Makefile` disagree. Call the Make targets, not t
 | `src/bba/provider.clj`, `openai.clj` | Providers and streaming. |
 | `src/bba/responses.clj`, `codex_auth.clj` | The `codex` provider: Responses API translation and the ChatGPT login. |
 | `src/bba/main.clj`, `tui.clj`, `ui.clj`, `md.clj`, `toolview.clj` | Command line, the charm.clj line editor, colors and spinner, the markdown renderer, and the Ctrl-O pager view of tool calls. |
-| `extensions/` | Core extensions: skills, MCP and compaction. |
+| `extensions/` | Core extensions: skills, MCP, compaction and context. |
 | `examples/` | Example extensions and an example `mcp.json`. |
 
 ## Credits

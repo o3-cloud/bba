@@ -68,6 +68,7 @@ flowchart TB
     SKL[extensions/skills.clj]
     MCPX[extensions/mcp.clj]
     CMP[extensions/compaction.clj]
+    CTX[extensions/context.clj]
   end
   BIN --> MAIN
   MAIN --> CORE
@@ -93,7 +94,7 @@ flowchart TB
 
 | Module | Approx. lines | Responsibility |
 |---|---|---|
-| `src/bba/core.clj` | 255 | System prompt, agent loop (`run-turns`), tool dispatch (`run-tool`), request hooks, sessions, extension loading. Kernel, with `ext.clj` kept under 500 lines total. |
+| `src/bba/core.clj` | 320 | System prompt, agent loop (`run-turns`), tool dispatch (`run-tool`), request hooks, sessions, extension loading, source reload (`reload-source!`). Kernel, with `ext.clj` kept under 500 lines total. |
 | `src/bba/ext.clj` | 103 | Extension registry: `register-tool!`, `register-command!`, `on!`, `on-unload!`, `set-provider!`, lookup fns, `emit`, `reset-extensions!`. Every registration is tagged with its source file. |
 | `src/bba/world.clj` | 591 | The evaluator: form parsing, lint gate, checkpoint/restore, `attempt!`, `rollback!`, catalogue, world system prompt, the `/develop` `/execute` `/preview` `/rollback` `/functions` `/describe` `/history` `/status` commands, world switching. |
 | `src/bba/world_store.clj` | 236 | Pure file I/O for `.bba/worlds/<name>/`: adapter template and validation, atomic writes, revisions, `CURRENT`, advisory `LOCK`, `ops.jsonl`, migration and forking. |
@@ -103,14 +104,16 @@ flowchart TB
 | `src/bba/openai.clj` | 102 | Chat Completions translation, used by `openai`, `openrouter` and `ollama`. |
 | `src/bba/responses.clj` | 180 | Responses API translation, used by `codex`. |
 | `src/bba/codex_auth.clj` | 66 | Read-only access to the Codex CLI login (`~/.codex/auth.json`) and JWT claim reading. |
-| `src/bba/main.clj` | 430 | `parse-args`, one-turn driver `agent-run`, streaming printer, SIGINT cancellation, built-in commands, `interactive`, `run`, `-main`. |
-| `src/bba/tui.clj` | 395 | Charm.clj-backed line editor: pure `press->key` and `handle-key`, pure `view-str` frame, history file. |
+| `src/bba/main.clj` | 448 | `parse-args`, one-turn driver `agent-run`, streaming printer, SIGINT cancellation, built-in commands, `interactive`, `run`, `-main`. |
+| `src/bba/tui.clj` | 524 | Charm.clj-backed line editor: pure `press->key` and `handle-key`, pure `view-str` frame wrapped to the terminal width (`row-ranges`, `caret-spot`), the footer row under the entry (`fit-row`), history file. |
 | `src/bba/md.clj` | 465 | Markdown to terminal rows: pure `md-line`/`render`, inline spans, wrapping, fenced panels, tables, `stream-row`. Widths in display cells via charm. |
-| `src/bba/toolview.clj` | 127 | How a tool call and its result look in the transcript: one-line calls clipped to the width, status lines, token and cost text, the turn rule, and the markdown detail page. |
+| `src/bba/toolview.clj` | 178 | How a tool call and its result look in the transcript: one-line calls clipped to the width, status lines, token and cost text, the turn rule, and the markdown detail page. |
 | `src/bba/ui.clj` | 77 | ANSI colours and the spinner worker. Every helper is identity when colour is off, so a caller styles unconditionally. |
 | `extensions/skills.clj` | 506 | Agent Skills: discovery, validation, the `activate_skill` tool, `/skills`. |
 | `extensions/mcp.clj` | 351 | MCP servers as tools, JSON-RPC demultiplexing, both protocol eras, `/mcp`. |
 | `extensions/compaction.clj` | 458 | Context-window compaction as a `:request` hook, `/compact`. |
+| `extensions/context.clj` | 344 | The context window and its use: `/context`, the `:turn-stop` rule and the `:prompt-footer` part. |
+| `extensions/prompt-info.clj` | 68 | The folder, the world and the target of the next message (full path of the working folder, the world name, then provider and model) as three `:prompt-footer` parts, ordered `5`, `7` and `10`. |
 
 Dependency direction: `main -> core -> ext`, `main -> world -> {world-store, lint, sys, ext}`,
 `core -> provider -> {openai, responses, codex-auth}`. `world-store`, `openai` and `responses` are pure
@@ -149,7 +152,7 @@ and one verifiable response. Keywords mark the pattern: `When` (event-driven), `
 | R-WORLD-2 | bba shall name the first world `main`. | `store/default-world` |
 | R-WORLD-3 | bba shall accept a world name of 1 to 64 characters of lowercase letters and digits joined by single hyphens, and reject the names `new`, `fork`, `temp`, the empty string, `../x`, `a/b` and 65-character names. | `store/valid-name?` |
 | R-WORLD-4 | If `world.edn` does not declare `:ns` as a simple symbol outside the harness namespaces clojure, bba, babashka, sci, cheshire, rewrite-clj and user, then bba shall refuse to open the world. | `store/read-adapter` |
-| R-WORLD-5 | When a key is missing from `world.edn`, bba shall supply the default `:ns world`, `:invariants []`, `:goals []`, `:timeout-ms 3600000`, `:max-result-chars 4000`, `:lint :reject`. | `store/default-adapter` |
+| R-WORLD-5 | When a key is missing from `world.edn`, bba shall supply the default `:ns world`, `:invariants []`, `:goals []`, `:timeout-ms 3600000`, `:max-result-chars 4000`, `:lint :reject`, `:max-revisions 20`. | `store/default-adapter` |
 | R-WORLD-6 | When a world folder is created, bba shall write `world.edn` from the documented template and a `.gitignore` listing `revisions/`, `CURRENT`, `LOCK`, `ops.jsonl` and `*.tmp`, and not list `world.edn`. | `store/ensure-dir!`, `store/adapter-template` |
 | R-WORLD-7 | When the store still has the single-world layout `.bba/world/`, bba shall move that folder to `.bba/worlds/main/` and warn. | `store/migrate!` |
 | R-WORLD-8 | If `.bba/world/` is held by a live process, then bba shall refuse the migration and report the pid. | `store/migrate!` |
@@ -172,7 +175,7 @@ and one verifiable response. Keywords mark the pattern: `When` (event-driven), `
 
 | ID | Requirement | Source |
 |---|---|---|
-| R-STORE-1 | bba shall publish each accepted attempt as a new revision file `revisions/%06d.edn` and never rewrite or delete an existing revision file. | `store/publish!` |
+| R-STORE-1 | bba shall publish each accepted attempt as a new revision file `revisions/%06d.edn` and never rewrite an existing revision file. | `store/publish!` |
 | R-STORE-2 | bba shall write every store file atomically, by writing a hidden temp file in the same directory and moving it into place. | `store/atomic-spit!` |
 | R-STORE-3 | bba shall write the complete revision file before moving `CURRENT`, so a crash cannot make a half-written revision current. | `store/publish!` |
 | R-STORE-4 | When bba starts and revisions above `CURRENT` exist, bba shall warn `ignored interrupted operation r<n>` and never reuse the orphan revision numbers. | `world/load-from-disk!`, `store/next-rev` |
@@ -185,6 +188,7 @@ and one verifiable response. Keywords mark the pattern: `When` (event-driven), `
 | R-STORE-11 | bba shall append one JSON line per attempt to the world's `ops.jsonl` with `:op-id`, `:op`, `:outcome`, `:ms`, `:revision` and `:ts`, and echo the line on stderr when `BBA_DEBUG` is set. | `store/log-op!`, `world/finish` |
 | R-STORE-12 | bba shall record in each revision the ordered `:log`, the printable `:state`, the names of unprintable state vars, `:rev`, `:base-rev`, `:type`, `:input`, `:remove`, `:op-id` and `:ts`. | `world/publish-snapshot!`, `store/publish!` |
 | R-STORE-13 | bba shall persist only public state vars whose value reads back as equal data, and warn listing the vars it could not save. | `world/printable?`, `world/publish-snapshot!` |
+| R-STORE-14 | After each published revision, bba shall delete the revision files older than the newest `:max-revisions` (default 20), always keeping the `CURRENT` revision and, in a forked world, revision 1; `:max-revisions nil` keeps every file. | `store/prune!`, `world/publish-snapshot!` |
 
 ### 3.3 Evaluation, checkpoints and restore (`R-EVAL`)
 
@@ -348,13 +352,17 @@ flowchart LR
 | R-EXT-2 | Where `--no-extensions` is given, bba shall load only the core extensions. | `core/load-extensions!` |
 | R-EXT-3 | bba shall tag every registration with the file that made it, so `/reload` can remove exactly the extension entries and keep the built-ins. | `ext/*source*`, `ext/put!` |
 | R-EXT-4 | bba shall expose `register-tool!` for a map with a string `:name` and a function `:handler`, and throw when either is missing. | `ext/register-tool!` |
-| R-EXT-5 | bba shall expose `register-command!`, `on!` (events `:session-start`, `:tool-call`, `:request`), `on-unload!` and `set-provider!`. | `ext/register-command!`, `ext/on!`, `ext/on-unload!`, `ext/set-provider!` |
+| R-EXT-5 | bba shall expose `register-command!`, `on!` (events `:session-start`, `:tool-call`, `:request`, `:turn-stop`, `:prompt-footer`), `on-unload!` and `set-provider!`. | `ext/register-command!`, `ext/on!`, `ext/on-unload!`, `ext/set-provider!` |
 | R-EXT-6 | bba shall pass tool handler input keys as keywords and a context map with `:cwd` and `:env`. | `core/run-tool`, `ext/register-tool!` |
 | R-EXT-7 | If an extension file fails to load, then bba shall warn with the file name and continue loading the remaining files. | `core/load-extension!` |
-| R-EXT-8 | When `/reload` runs, bba shall run the unload hooks of the extensions being dropped, newest first, remove their registrations, reload every extension file, and emit `:session-start`. | `ext/reset-extensions!`, `main/builtin-commands` |
+| R-EXT-8 | When `/reload` runs, bba shall reload the bba source namespaces, dependencies first, run the unload hooks of the extensions being dropped, newest first, remove their registrations, reload every extension file, and emit `:session-start`. | `core/reload-source!`, `core/core-namespace-order`, `ext/reset-extensions!`, `main/builtin-commands` |
+| R-EXT-8a | When a reload of a source namespace fails, bba shall warn and continue with the remaining namespaces. | `core/reload-source!` |
 | R-EXT-9 | If an unload hook throws, then bba shall warn and ignore it. | `ext/run-unloaders!` |
 | R-EXT-10 | If an extension replaces a registration from a different source, then bba shall warn which source replaces what. | `ext/put!` |
 | R-EXT-11 | When `:session-start` is emitted, bba shall emit it at session start, on `/new`, and after `/reload`. | `main/run-session`, `main/interactive`, `main/builtin-commands` |
+| R-EXT-12 | bba shall emit `:prompt-footer` at each prompt frame and join the text of its hooks on one dim row under the input, ordered by each hook's `:order` and not by the order of the files. | `core/prompt-footer`, `core/footer-part`, `tui/view-str` |
+| R-EXT-12a | If a `:prompt-footer` hook throws, then bba shall warn and ignore it, and draw the parts of the other hooks. | `ext/emit-results`, `core/prompt-footer` |
+| R-EXT-12b | If a `:prompt-footer` hook returns no text, then bba shall draw no row for that hook. | `core/footer-part` |
 
 ### 3.9 Terminal interface (`R-TUI`, `R-MD`)
 
@@ -367,14 +375,20 @@ flowchart LR
 | R-TUI-3a | bba shall translate charm.clj key-press messages into that key vocabulary in a pure function, ignoring messages it does not bind. | `tui/press->key` |
 | R-TUI-4 | When Enter is pressed with a trailing backslash, or Alt+Enter is pressed, bba shall insert a newline instead of submitting. | `tui/handle-key` |
 | R-TUI-5 | bba shall render one frame per charm message as a pure function of the edit state, showing the prompt, the buffer and a reverse-video caret at the cursor. | `tui/view-str` |
-| R-TUI-5a | bba shall indent the continuation of a wrapped or new line by the width of the plain prompt, so styling escapes cannot shift the layout. | `tui/view-str` |
+| R-TUI-5a | bba shall indent the continuation of a wrapped or new line by the width of the plain prompt, so styling escapes cannot shift the layout. | `tui/view-str`, `tui/new-state`, `tui/entry-update` |
 | R-TUI-5b | bba shall deliver bracketed pastes as one insert, with carriage returns normalised to newlines. | `tui/entry-update` |
+| R-TUI-5c | bba shall wrap the entry to the terminal width less the plain prompt's width, breaking after the last space that fits, so a long entry keeps its caret and its end on screen. | `tui/view-str`, `tui/row-ranges` |
+| R-TUI-5d | When a word is wider than a whole row, bba shall cut it at the last display cell that fits. | `tui/row-ranges` |
+| R-TUI-5e | bba shall put the caret past the end of a full row on a row of its own, so the cursor is never invisible. | `tui/view-str`, `tui/caret-spot` |
+| R-TUI-5f | bba shall draw the footer, when there is one, on rows after the entry rows, each cut to the terminal width, and draw no footer on the frame of a sent or cancelled entry. | `tui/view-str`, `tui/fit-row` |
 | R-TUI-6 | When Ctrl-D is pressed on an empty buffer, or `/quit` or `/exit` is typed, bba shall exit the session. | `tui/handle-key`, `main/interactive` |
 | R-TUI-6a | When Ctrl-C is pressed on an empty buffer, bba shall clear the line and stay in the session. | `tui/handle-key`, `main/interactive` |
 | R-TUI-7 | bba shall disable colours and the spinner when output is not a terminal or when `NO_COLOR` is set. | `ui/enable!` |
 | R-TUI-8 | While the model works, bba shall show a spinner labelled `thinking...` or `running <tool>...` with elapsed seconds, and pause it to print progress lines. | `ui/start!`, `ui/log!`, `main/agent-run` |
 | R-TUI-9 | bba shall render model text as markdown on a terminal: headings, bullets, quotes, rules, fenced panels, tables and inline spans become styled rows. | `md/md-line`, `md/render` |
 | R-TUI-9a | bba shall render a tool call as one line of at most the terminal width, giving the label, the code and a `remove` suffix a share of the width, so a long code with a removal list cannot overflow the row. | `toolview/call-str` |
+| R-TUI-9b | bba shall measure the turn rule in display cells, so a styled rule fills the width and a cut never splits a grapheme. | `toolview/turn-rule`, `toolview/fit` |
+| R-TUI-9c | When a turn rule is cut, bba shall close the style that the cut interrupts, so the terminal does not stay dim. | `toolview/fit` |
 
 #### 3.9.1 Markdown renderer (`R-MD`)
 
@@ -437,7 +451,7 @@ needs one line of lookahead.
 
 | ID | Requirement | Source |
 |---|---|---|
-| R-CEXT-1 | bba shall always load the core extensions `skills.clj`, `mcp.clj` and `compaction.clj`, also with `--no-extensions`. | `core/load-extensions!` |
+| R-CEXT-1 | bba shall always load the core extensions `skills.clj`, `mcp.clj`, `compaction.clj`, `context.clj` and `prompt-info.clj`, also with `--no-extensions`. | `core/load-extensions!` |
 
 #### Skills (Agent Skills specification)
 
@@ -479,6 +493,24 @@ needs one line of lookahead.
 | R-CEXT-23 | If summarisation fails, then bba shall send the whole conversation. | `compaction/compact-request` |
 | R-CEXT-24 | bba shall support `/compact`, `/compact on`, `/compact off` and `/compact model PROVIDER [MODEL]`. | `compaction/register-command!` |
 
+#### Context
+
+| ID | Requirement | Source |
+|---|---|---|
+| R-CEXT-25 | bba shall report the size of the context against the model's window, with one row for each part: the prompt, the tool specs, the message history and the turn. | `context/detail-rows`, `context/report` |
+| R-CEXT-26 | bba shall take the used count from the input tokens that the provider reports for the last call, and use the character estimate only while no turn has run and as the per-part breakdown. | `context/sent-tokens`, `context/measure` |
+| R-CEXT-27 | bba shall take the window from `BBA_CONTEXT_WINDOW` first, then a static table, then a probe of the local Ollama server, and report an unknown window rather than a guess. | `context/window`, `context/window-source`, `context/probe!` |
+| R-CEXT-28 | bba shall ask the local Ollama server for `POST /api/show` one time in a session and keep the answer, including a nil answer. | `context/remember-probe!` |
+| R-CEXT-29 | bba shall register a `:turn-stop` hook that replaces the dim rule of the turn footer with the tool count, the last prompt size, the output tokens, the cost, the elapsed time and the share of the window. | `context/turn-stop`, `ext/emit-results` |
+| R-CEXT-29a | bba shall register a `:prompt-footer` hook that shows the share of the window and the room left after the last turn, for at most one row under the input. | `context/footer`, `core/footer-part` |
+| R-CEXT-30 | If the window is unknown, then bba shall show every part of the prompt and leave the share out of the turn rule. | `context/used-str`, `context/rule-parts` |
+| R-CEXT-31 | bba shall show the on-disk session apart from the sent view only when the two differ. | `context/measure` |
+| R-CEXT-32 | If a hook for `:turn-stop` fails or returns no rule, then bba shall print the default turn rule. | `main/agent-run`, `context/turn-stop` |
+| R-CEXT-33 | bba shall register a `:prompt-footer` hook that shows the full path of the working folder, at order `5`, so the folder starts the row and a cut to the terminal width keeps the folder and drops the end of the row. | `prompt-info/cwd-footer`, `core/footer-part` |
+| R-CEXT-33a | If the ctx holds no working folder, then bba shall draw no folder part. | `prompt-info/cwd-str` |
+| R-CEXT-34 | bba shall register a `:prompt-footer` hook that shows the name of the world that the session runs, at order `7`, and read it from the live ctx so that a `/world` switch shows at the next prompt. | `prompt-info/world-footer`, `main/run-session` |
+| R-CEXT-34a | If the ctx names no world, then bba shall draw no world part, and no empty part with a separator. | `prompt-info/world-str`, `core/footer-part` |
+
 ### 3.12 Persistence and effects outside the world (`R-EFF`)
 
 | ID | Requirement | Source |
@@ -514,7 +546,8 @@ needs one line of lookahead.
  :goals      [{:name "has shout" :form (ifn? shout)}]
  :timeout-ms 3600000        ; one hour; the default a fresh world gets (README "Limits")
  :max-result-chars 4000
- :lint :reject}             ; :reject | :warn | :off
+ :lint :reject              ; :reject | :warn | :off
+ :max-revisions 20}         ; newest revision files kept; nil keeps all
 
 ;; A temporary world's adapter adds:
 ;; :temporary? true :source-world "main" :source-revision 3
@@ -695,6 +728,8 @@ stateDiagram-v2
 (ext/on! :tool-call     (fn [{:keys [name input]} ctx] nil))  ; {:block true :reason ".."} blocks
 (ext/on! :request       (fn [{:keys [request]} ctx] nil))     ; {:request req'} transforms the request
 (ext/on! :session-start (fn [_ ctx] nil))                     ; start, /new, after /reload
+(ext/on! :turn-stop     (fn [facts ctx] nil))                 ; {:turn-rule s} closes the turn
+(ext/on! :prompt-footer (fn [_ ctx] nil))                     ; {:order n :text s} under the input
 (ext/on-unload! (fn [] nil))                                  ; cleanup when /reload drops the extension
 (ext/set-provider! (fn [{:keys [messages system tools]}]) )   ; replace the provider
 ```
@@ -703,7 +738,7 @@ stateDiagram-v2
 |---|---|---|
 | `ext/register-tool!` | `[tool]` | Needs a string `:name` and a fn `:handler`; throws otherwise. `:description` defaults to `""`, `:input-schema` to `{:type "object" :properties {}}`. |
 | `ext/register-command!` | `[name handler]` | The handler is `(fn [args-string ctx])`. |
-| `ext/on!` | `[event handler]` | Events `:session-start`, `:tool-call`, `:request`. Hooks append; they are not replaced. |
+| `ext/on!` | `[event handler]` | Events `:session-start`, `:tool-call`, `:request`, `:turn-stop`, `:prompt-footer`. Hooks append; they are not replaced. |
 | `ext/on-unload!` | `[f]` | Zero-argument cleanup, run newest first, errors warned and ignored. |
 | `ext/set-provider!` | `[f]` | `(fn [{:keys [messages system tools on-text]}])` returns an assistant message. |
 | `ext/emit` | `[event payload ctx]` | Runs non-guard hooks; a hook error warns and is ignored (fail-open). |
@@ -833,12 +868,13 @@ left unpinned. They are recorded rather than turned into requirements.
 
 | Requirement group | Principal tests |
 |---|---|
-| `R-CLI-*`, `R-LOOP-*`, `R-SESS-*`, `R-EXT-*` | `bba_test.clj`: `ac1-print-mode-with-tool-use`, `ac2-extension-adds-tool`, `ac3-self-improvement-with-reload`, `ac4-hook-blocks-tool-call`, `ac5-broken-extension-does-not-stop-harness`, `ac6-missing-api-key`, `ac8-tool-errors-are-results`, `ac9-entry-point-name`, `max-turns-bound`, `agents-md-in-system-prompt`, `session-file-written-without-key`, `reload-drops-broken-file-registrations`, `unload-hooks-run-on-reload-and-drop-broken-files`, `hook-error-fails-closed-and-override-warns`, `request-hook-transforms-what-is-sent`, `request-hook-failure-is-fail-open`, `request-hook-bad-return-is-ignored`, `parse-args-cases`, `interactive-survives-provider-and-command-errors`, `session-start-event-and-no-extensions-flag`, `new-starts-a-fresh-session` |
-| `R-WORLD-*`, `R-STORE-*`, `R-EVAL-*`, `R-LINT-*` | `world_test.clj`: `s1`-`s10`, `tools-through-the-agent-loop`, `goals-reported-not-enforced`, `execute-must-not-define-or-redefine`, `reader-errors-and-namespace-switches`, `multi-form-develop-is-all-or-nothing`, `lint-rejects-errors-before-evaluation`, `library-aliases-survive-restores`, `lint-warn-and-off`, `removal`, `timeout-restores`, `lock-held-by-live-process`, `startup-falls-back-when-latest-does-not-load`, `develop-side-effects-replay-on-restore`, `gitignore-and-default-adapter`, `adapter-ns-must-not-name-a-harness-namespace`, `restore-property-random-sequences`, `ctrl-c-interrupt-restores`, `old-single-world-moves-to-main`, `create-switch-and-isolate`, `fork-at-a-revision`, `failed-switch-keeps-the-current-world`, `world-names`, `cli-world-flag-and-continue` |
+| `R-CLI-*`, `R-LOOP-*`, `R-SESS-*`, `R-EXT-*` | `bba_test.clj`: `ac1-print-mode-with-tool-use`, `ac2-extension-adds-tool`, `ac3-self-improvement-with-reload`, `ac4-hook-blocks-tool-call`, `ac5-broken-extension-does-not-stop-harness`, `ac6-missing-api-key`, `ac8-tool-errors-are-results`, `ac9-entry-point-name`, `max-turns-bound`, `agents-md-in-system-prompt`, `session-file-written-without-key`, `reload-drops-broken-file-registrations`, `the-namespace-order-puts-a-namespace-after-what-it-requires`, `reload-source-gives-the-image-a-new-core-function`, `unload-hooks-run-on-reload-and-drop-broken-files`, `hook-error-fails-closed-and-override-warns`, `prompt-footer-joins-hooks-in-given-order`, `prompt-footer-follows-the-live-provider`, `request-hook-transforms-what-is-sent`, `request-hook-failure-is-fail-open`, `request-hook-bad-return-is-ignored`, `parse-args-cases`, `interactive-survives-provider-and-command-errors`, `session-start-event-and-no-extensions-flag`, `new-starts-a-fresh-session` |
+| `R-WORLD-*`, `R-STORE-*`, `R-EVAL-*`, `R-LINT-*` | `world_test.clj`: `s1`-`s10`, `tools-through-the-agent-loop`, `goals-reported-not-enforced`, `execute-must-not-define-or-redefine`, `reader-errors-and-namespace-switches`, `multi-form-develop-is-all-or-nothing`, `lint-rejects-errors-before-evaluation`, `library-aliases-survive-restores`, `lint-warn-and-off`, `removal`, `timeout-restores`, `lock-held-by-live-process`, `startup-falls-back-when-latest-does-not-load`, `develop-side-effects-replay-on-restore`, `gitignore-and-default-adapter`, `adapter-ns-must-not-name-a-harness-namespace`, `restore-property-random-sequences`, `ctrl-c-interrupt-restores`, `old-single-world-moves-to-main`, `create-switch-and-isolate`, `fork-at-a-revision`, `revisions-are-capped`, `prune-keeps-current-below-orphans`, `failed-switch-keeps-the-current-world`, `world-names`, `cli-world-flag-and-continue` |
 | `R-PROV-*` | `providers_test.clj`: `messages-to-chat-completions`, `tools-to-functions`, `reply-from-chat-completions`, `check-env-per-provider`, `parse-provider-and-model-flags`, `provider-flag-overrides-env-in-main`, `openai-over-http`, `openrouter-over-http`, `ollama-over-http`, `default-provider-is-ollama-deepseek`, `switch-commands-show-and-validate`, `switch-reaches-the-next-request`, `provider-command-takes-an-optional-model`; `codex_test.clj`: `auth-file-uses-codex-home`, `reading-jwt-claims`, `access-token-from-env-then-from-the-codex-file`, `check-env-for-codex`, `messages-to-responses-input`, `tools-are-flat-not-nested`, `build-request-always-streams`, `folding-a-stream`, `folding-edge-cases`, `codex-over-http`, `from-env-selects-codex`, `codex-runs-a-turn-end-to-end` |
-| `R-MD-*` | `md_test.clj`: `inline-spans-name-their-element`, `a-code-span-wins-over-the-emphasis-inside-it`, `a-link-keeps-its-target`, `emphasis-needs-a-boundary`, `width-counts-cells-not-characters`, `fit-never-splits-a-wide-character`, `wrapping-fills-the-width`, `a-word-longer-than-the-row-is-cut`, `no-row-needs-the-terminals-own-wrap`, `a-row-is-not-widened-by-escape-styling`, `headings`, `bullets-get-a-marker`, `a-wrapped-bullet-stays-inside-its-marker`, `a-nested-bullet-keeps-its-indent`, `quotes-indent-under-a-bar`, `a-rule-spans-the-width`, `a-fenced-block-is-a-panel`, `markup-inside-a-fence-is-left-alone`, `a-fence-with-no-info-string-has-no-label`, `a-long-code-line-wraps-inside-the-panel`, `a-table-is-aligned-and-only-fits-the-width`, `a-header-without-a-delimiter-is-not-a-table`, `a-wide-table-is-capped-to-the-width`, `inline-markup-in-a-table-cell-is-rendered`, `a-line-that-fits-is-complete-and-one-row`, `a-wrapped-line-holds-back-its-partial-row`, `an-open-fence-is-not-complete`, `stream-row-is-pure`, `without-rendering-the-text-is-untouched`, `colour-off-still-removes-the-markup` |
+| `R-MD-*` | `md_test.clj`: `inline-spans-name-their-element`, `a-code-span-wins-over-the-emphasis-inside-it`, `a-link-keeps-its-target`, `emphasis-needs-a-boundary`, `width-counts-cells-not-characters`, `fit-never-splits-a-wide-character`, `wrapping-fills-the-width`, `a-word-longer-than-the-row-is-cut`, `no-row-needs-the-terminals-own-wrap`, `a-row-is-not-widened-by-escape-styling`, `headings`, `bullets-get-a-marker`, `a-wrapped-bullet-stays-inside-its-marker`, `a-nested-bullet-keeps-its-indent`, `quotes-indent-under-a-bar`, `a-rule-spans-the-width`, `a-fenced-block-is-a-panel`, `markup-inside-a-fence-is-left-alone`, `a-fence-with-no-info-string-has-no-label`, `a-long-code-line-wraps-inside-the-panel`, `a-table-is-aligned-and-only-fits-the-width`, `a-header-without-a-delimiter-is-not-a-table`, `a-wide-table-is-capped-to-the-width`, `inline-markup-in-a-table-cell-is-rendered`, `a-line-that-fits-is-complete-and-one-row`, `a-wrapped-line-holds-back-its-partial-row`, `an-open-fence-is-not-complete`, `stream-row-is-pure`, `without-rendering-the-text-is-untouched`, `colour-off-still-removes-the-markup` | |
+| `R-TUI-*` | `tui_test.clj`: `typing-and-cursor-moves`, `kill-keys`, `enter-submits-or-continues`, `press-to-key-mapping`, `view-shows-prompt-buffer-and-caret`, `view-draws-a-footer-under-the-entry`, `row-ranges-wrap-words`, `view-caret-stays-on-screen`, `turn-rule-closes-a-turn`, `a-turn-rule-with-colour-still-fits`, `fit-keeps-one-line-and-never-splits-a-wide-character` |
 | `R-NFR-1`, `R-NFR-2` | `bba_test.clj`: `ac7-core-size`, `nfr4-startup-time` |
-| `R-CEXT-*` | No dedicated test file; exercised indirectly through `activate_skill` in `world_test.clj:246` and through the extension loader tests in `bba_test.clj`. This is the largest untested surface in the repository. |
+| `R-CEXT-*` | No dedicated test file; exercised indirectly through `activate_skill` in `world_test.clj:246` and through the extension loader tests in `bba_test.clj`. The `:prompt-footer` parts are the exception: `bba_test.clj` covers them in `prompt-footer-joins-hooks-in-given-order` (the folder starts the row, the world follows it, and a ctx with no folder or no world adds no part) and `prompt-footer-follows-the-live-provider` (a `/provider` or `/world` change shows at the next prompt). This is the largest untested surface in the repository. |
 
 ## 9. Deployment and operation
 

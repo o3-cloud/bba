@@ -1,7 +1,6 @@
 (ns jev-evaluation-test
   "Safe, table-driven evaluation tests for the Jev guardrail."
   (:require [babashka.fs :as fs]
-            [cheshire.core :as json]
             [clojure.test :refer [deftest is testing]]
             [bba.ext :as ext]
             [bba.provider :as provider]))
@@ -9,6 +8,7 @@
 (def root (str (fs/parent (fs/parent (fs/absolutize *file*)))))
 (def extension-file (str root "/extensions/jev-guardrail.clj"))
 (binding [ext/*source* extension-file] (load-file extension-file))
+(alias 'jg 'bba.extensions.jev-guardrail)
 
 (def enabled {"BBA_GUARDRAIL_ENABLED" "true"})
 
@@ -28,7 +28,7 @@
 
 (defn- run-case [c]
   (with-redefs [provider/systemone (fn [_] (fn [_] (reply c)))]
-    (bba.extensions.jev-guardrail/guard (select-keys c [:name :input]) {:env enabled})))
+    (jg/guard (select-keys c [:name :input]) {:env enabled})))
 
 (deftest labeled-evaluation
   (let [results (mapv (fn [c] [c (run-case c)]) cases)]
@@ -47,4 +47,4 @@
 
 (deftest classifier-failure-fails-closed
   (with-redefs [provider/systemone (fn [_] (fn [_] (throw (ex-info "offline" {}))))]
-    (is (:block (bba.extensions.jev-guardrail/guard {:name "terraform" :input {:args ["destroy"]}} {:env enabled})))))
+    (is (:block (jg/guard {:name "terraform" :input {:args ["destroy"]}} {:env enabled})))))

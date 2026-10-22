@@ -83,12 +83,18 @@
 ;; ---------------------------------------------------------------- HTTP
 
 (defn- with-server
-  "Run (f base-url) against a local server that answers with `status` and `body`. Returns [result requests]."
+  "Run (f base-url) against a local server that answers with `status` and `body`.
+  Returns [result requests]. A probe of /api/show gets a model_info reply, as a
+  real Ollama server gives, and is not counted as a chat request."
   [status body f]
   (let [reqs (atom [])
         stop (server/run-server
-              (fn [req] (swap! reqs conj {:uri (:uri req) :headers (:headers req) :body (json/parse-string (slurp (:body req)) true)})
-                {:status status :headers {"content-type" "application/json"} :body body})
+              (fn [req]
+                (if (= "/api/show" (:uri req))
+                  {:status 200 :headers {"content-type" "application/json"}
+                   :body (json/generate-string {:model_info {"probe.context_length" 32768}})}
+                  (do (swap! reqs conj {:uri (:uri req) :headers (:headers req) :body (json/parse-string (slurp (:body req)) true)})
+                      {:status status :headers {"content-type" "application/json"} :body body})))
               {:port 0 :legacy-return-value? false})
         base (str "http://127.0.0.1:" (server/server-port stop))]
     (try [(f base) @reqs] (finally (server/server-stop! stop)))))

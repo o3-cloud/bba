@@ -1,7 +1,9 @@
 # TODO — review later
 
 From the code review of 2026-10-13. The 8 confirmed issues are fixed in this working tree.
-`bb test` runs 175 tests and 869 assertions: 0 failures. `bb lint` exits 0.
+`bb test` runs 228 tests and 1154 assertions: 0 failures. `bb lint` exits 0: no
+clj-kondo warning, no format fault and no carve finding. `bb lint` covers `src`,
+`test`, `extensions`, `ci`, `examples` and `bin`.
 
 This file lists what is left. Each item is open, not done. No item below has a fix in this tree.
 
@@ -146,3 +148,11 @@ These paths are untracked. Decide each one: keep, commit, or delete.
 - `/reload` does not lose the `mcp__*` tools. `main.clj:285` calls `core/load-extensions!`
   and then `ext/emit :session-start`, and `mcp.clj:336` registers every server on that hook.
   Verified by probe.
+
+## 7. Ideas to explore
+
+Not defects. Each idea has its own record in `docs/ideas/`.
+
+- [001: Run world code in a restricted SCI context](docs/ideas/001-run-world-code-in-sci.md):
+  a deny-by-default capability boundary for `execute_form` and `develop_form`, with
+  gated `fs`, `http` and `sys/sh`. Probed, not built.

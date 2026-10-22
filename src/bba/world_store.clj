@@ -9,7 +9,7 @@
             [bba.ext :as ext]))
 
 (def default-adapter
-  {:ns 'world :invariants [] :goals [] :timeout-ms 3600000 :max-result-chars 4000 :lint :reject})
+  {:ns 'world :invariants [] :goals [] :timeout-ms 3600000 :max-result-chars 4000 :lint :reject :max-revisions 20})
 
 (def adapter-template
   (str ";; bba world adapter. Read as EDN data; the forms below are evaluated in the world namespace.\n"
@@ -17,7 +17,8 @@
        ";; :goals are reported as met / unmet and never reject a change.\n"
        ";; Example: {:name \"reverse works\" :form (= \"cba\" (reverse-string \"abc\"))}\n"
        ";; :lint runs clj-kondo on each form first: :reject (errors reject), :warn (report only) or :off.\n"
-       "{:ns world\n :invariants []\n :goals []\n :timeout-ms 3600000\n :max-result-chars 4000\n :lint :reject}\n"))
+       ";; :max-revisions keeps the newest N revision files and deletes older ones; nil keeps all.\n"
+       "{:ns world\n :invariants []\n :goals []\n :timeout-ms 3600000\n :max-result-chars 4000\n :lint :reject\n :max-revisions 20}\n"))
 
 ;; ---------------------------------------------------------------- worlds
 
@@ -134,6 +135,20 @@
     (atomic-spit! file (binding [*print-length* nil *print-level* nil] (pr-str revision)))
     (atomic-spit! (f dir "CURRENT") (format "%06d\n" rev))
     rev))
+
+(defn prune!
+  "Delete revision files older than the newest `keep-n`. CURRENT is always kept, and so is
+  revision 1 of a fork, which records :forked-from. nil keeps all. Returns the deleted numbers."
+  [dir keep-n]
+  (when (pos-int? keep-n)
+    (let [nums (rev-numbers dir)
+          cur (current dir)
+          kept (cond-> (set (take-last keep-n nums))
+                 cur (conj cur)
+                 (:forked-from (read-rev dir 1)) (conj 1))
+          old (vec (remove kept nums))]
+      (doseq [n old] (fs/delete-if-exists (rev-file dir n)))
+      old)))
 
 ;; ---------------------------------------------------------------- lock
 
