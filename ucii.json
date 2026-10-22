@@ -24,7 +24,7 @@
       "idempotent": true
     },
     "verify": {
-      "description": "Run clj-kondo, the cljfmt check, splint and carve over src, test, extensions and ci, then check that this manifest matches the Makefile. Changes no project files.",
+      "description": "Run clj-kondo, the cljfmt check, splint and carve over src, test, extensions, ci, examples and bin, then check that this manifest matches the Makefile. Changes no project files.",
       "standard": true,
       "required": false,
       "invoke": "make verify",
@@ -32,7 +32,7 @@
       "idempotent": true
     },
     "fmt": {
-      "description": "Rewrite src, test, extensions and ci with cljfmt. Changes files in the working tree.",
+      "description": "Rewrite src, test, extensions, ci, examples and bin with cljfmt. Changes files in the working tree.",
       "standard": false,
       "required": false,
       "invoke": "make fmt",

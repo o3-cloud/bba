@@ -3,6 +3,7 @@
   (execute_form, develop_form) show their Clojure code as code and their EDN result
   as a status line; any other tool shows its name and clipped JSON input."
   (:require [cheshire.core :as json]
+            [charm.ansi.width :as width]
             [clojure.edn :as edn]
             [clojure.string :as str]
             [bba.ui :as ui]))
@@ -42,14 +43,14 @@
          (str head code (when (and tail (pos? room2)) (ui/dim (clip tail room2)))))
        :else (str head (ui/dim (clip (json/generate-string input) room)))))))
 
-(defn- tokens-str
+(defn tokens-str
   "A token count in a few characters: 845, 12.3k, 1.2M."
   [n]
   (cond (< n 1000) (str n)
         (< n 999500) (str/replace (format "%.1fk" (/ n 1e3)) #"\.0k$" "k")
         :else (str/replace (format "%.1fM" (/ n 1e6)) #"\.0M$" "M")))
 
-(defn- cost-str [usd]
+(defn cost-str [usd]
   (cond (zero? usd) "$0"
         (< usd 0.01) (format "$%.4f" usd)
         :else (format "$%.2f" usd)))
@@ -58,14 +59,35 @@
   "The dim rule that closes a turn: the tool count (when there were calls), the
   input and output tokens and the cost (when known), and the elapsed seconds, then
   a line to `width`."
-  [{:keys [tools millis usage cost]} width]
+  [{:keys [tools millis usage cost]} cells]
   (let [parts (cond-> []
                 (pos? tools) (conj (str tools (if (= 1 tools) " tool" " tools")))
                 usage (conj (str (tokens-str (:input usage)) " in") (str (tokens-str (:output usage)) " out"))
                 cost (conj (cost-str cost))
                 :always (conj (format "%.0fs" (/ millis 1000.0))))
         label (str "── " (str/join " · " parts) " ")]
-    (ui/dim (str label (apply str (repeat (max 0 (- width (count label))) "─"))))))
+    (ui/dim (str label (apply str (repeat (max 0 (- cells (width/string-width label))) "─"))))))
+
+(def ^:private escape-re #"\u001b\[[0-9;]*m")
+
+(defn fit
+  "`rule` on one line of at most `width` display cells. A rule that is too long is cut
+  and given an ellipsis, so the caller can print it without a wrap. An escape costs no
+  cell, so colour cannot shorten the rule. A cut closes the style that it interrupts,
+  so the terminal does not stay dim."
+  [rule cells]
+  (let [s (str/replace (str rule) #"\s*\n\s*" " ")
+        budget (max 1 cells)]
+    (if (<= (width/string-width s) budget)
+      s
+      (let [[kept _] (reduce (fn [[acc used :as state] tok]
+                               (let [w (width/string-width tok)]
+                                 (if (<= (+ used w) (dec budget))
+                                   [(str acc tok) (+ used w)]
+                                   (reduced state))))
+                             ["" 0]
+                             (re-seq #"\u001b\[[0-9;]*m|\X" s))]
+        (str kept (when (re-find escape-re kept) "\u001b[0m") "…")))))
 
 (defn- read-result [s]
   (try (let [v (edn/read-string {:default (fn [_ v] v)} s)] (when (map? v) v))

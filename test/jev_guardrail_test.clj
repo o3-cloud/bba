@@ -3,6 +3,7 @@
   transcript block. The guardrail ships as a core extension file, not as a
   classpath namespace, so the tests load that file directly."
   (:require [babashka.fs :as fs]
+            [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [bba.ext :as ext]
@@ -23,7 +24,7 @@
 (defn- replies
   "Run `f` with the Jev provider returning `text` for every call."
   [text f]
-  (with-redefs [provider/systemone (fn [_] (fn [_] (let [d (cheshire.core/parse-string text true)] {:answers {:score {:type "noul" :noul (/ (:score d) 100.0)}} :reason (:reason d)})))]
+  (with-redefs [provider/systemone (fn [_] (fn [_] (let [d (json/parse-string text true)] {:answers {:score {:type "noul" :noul (/ (:score d) 100.0)}} :reason (:reason d)})))]
     (f)))
 
 (defn- call [ctx] (j/guard {:name "shell" :input {:cmd "rm -rf /some/dir"}} ctx))

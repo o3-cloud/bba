@@ -29,6 +29,7 @@
        "  :handler (fn [{:keys [text]} ctx] (str/upper-case text))})  ; return a string or {:content s :is-error true}\n"
        "(ext/register-command! \"hi\" (fn [args ctx] (println \"hi\" args)))  ; the user types /hi\n"
        "(ext/on! :tool-call (fn [{:keys [name input]} ctx] nil))  ; return {:block true :reason \"..\"} to block\n"
+       "(ext/on! :prompt-footer (fn [_ ctx] {:order 10 :text \"..\"}))  ; a dim row under the input\n"
        "Handlers get input keys as keywords. ctx has :cwd (the working folder) and :env (environment map)."
        (agents-md home)
        (agents-md cwd)))
@@ -150,6 +151,45 @@
 
 ;; ---------------------------------------------------------------- hooks
 
+(def footer-default-order 50)
+
+(def footer-default-row 1)
+
+(defn footer-part
+  "One :prompt-footer result as [row order text]: a bare string takes the default row
+  and order, and a map says where its text belongs. Row 0 is the top row under the
+  input; row 1 is the next row down, which a result with no :row takes, so an
+  extension cannot land on the top row by accident. nil when the result has no text."
+  [r]
+  (let [[row order text] (if (map? r)
+                           [(or (:row r) footer-default-row)
+                            (or (:order r) footer-default-order)
+                            (:text r)]
+                           [footer-default-row footer-default-order r])]
+    (when (and (string? text) (not (str/blank? text)))
+      [(long row) (long order) (str/trim text)])))
+
+(defn prompt-footer
+  "The dim status line under the input: what the :prompt-footer hooks return, joined by
+  a dot. A hook gets the live ctx, so its part shows the provider and model that the
+  next message uses; the order comes from the hook, not from the load order of the
+  files. A hook can put its text on a row with :row, so the folder and the world sit
+  on the top row and the target and the context on the row below. One row returns a
+  string; two or more rows return a vector of strings, which tui draws on its own rows.
+  A hook that returns nil adds nothing; a hook that throws is warned and ignored
+  (fail-open). nil when no hook answers, so the caller passes no footer."
+  [ctx]
+  (let [rows (->> (ext/emit-results :prompt-footer {} ctx)
+                  (keep footer-part)
+                  (sort-by (juxt first second))
+                  (partition-by first)
+                  (map (fn [ps] (->> ps (map #(nth % 2)) distinct vec)))
+                  (remove empty?))]
+    (case (count rows)
+      0 nil
+      1 (str/join " · " (first rows))
+      (mapv #(str/join " · " %) (vec rows)))))
+
 (defn apply-request-hooks
   "Let extensions transform the request that goes to the provider. Called once per
   turn, so a hook sees the live ctx (for example a provider switch).
@@ -183,24 +223,31 @@
          "the server stopped before producing an answer")
        ")"))
 
+(defn prompt-request
+  "The request that the next call sends, before the :request hooks. The turn rule
+  and /context measure this, so their numbers match what the provider sees."
+  [ctx messages]
+  (cond-> {:messages messages :system (prompt-for ctx) :tools (tool-specs)}
+    (:on-text ctx) (assoc :on-text (:on-text ctx))))
+
 (defn run-turns
   "Call the provider until it stops asking for tools.
   Returns {:status :ok|:incomplete|:max-turns, :text final-text, :messages all-messages,
-  :usage the summed {:input :output :cost} the provider reported, or nil}. A reply the
+  :usage the summed {:input :output :cost} the provider reported, or nil,
+  :last-usage the same sum for the final reply only (the size of what is sent next)}. A reply the
   provider marked :incomplete returns :status :incomplete, never :ok: a cut answer must
   not look like a finished turn."
   [ctx messages]
   (let [call (or (ext/provider) (provider/from-env (:env ctx)))
         max-turns (or (:max-turns ctx) default-max-turns)
         width (or (get-in ctx [:md :width]) 80)]
-    (loop [messages messages turn 0 usage nil]
+    (loop [messages messages turn 0 usage nil last-usage nil]
       (if (>= turn max-turns)
-        {:status :max-turns :messages messages :usage usage
+        {:status :max-turns :messages messages :usage usage :last-usage last-usage
          :text (str "stopped: reached max turns (" max-turns ")")}
         (let [_ (when-let [f (:on-request ctx)] (f))
-              base (cond-> {:messages messages :system (prompt-for ctx) :tools (tool-specs)}
-                     (:on-text ctx) (assoc :on-text (:on-text ctx)))
-              reply (call (apply-request-hooks base ctx))
+              sent (apply-request-hooks (prompt-request ctx messages) ctx)
+              reply (call sent)
               amsg {:role "assistant" :content (:content reply)}
               uses (filter #(= "tool_use" (:type %)) (:content reply))
               messages (conj messages amsg)
@@ -209,9 +256,11 @@
           (if (empty? uses)
             (let [text (str/join "\n" (keep #(when (= "text" (:type %)) (:text %)) (:content reply)))]
               (if-let [why (:incomplete reply)]
-                {:status :incomplete :messages messages :usage usage :incomplete why
+                {:status :incomplete :messages messages :usage usage
+                 :last-usage (:usage reply) :incomplete why
                  :text (str text (incomplete-note why))}
-                {:status :ok :messages messages :usage usage :text text}))
+                {:status :ok :messages messages :usage usage
+                 :last-usage (:usage reply) :text text}))
             (let [results (mapv (fn [u]
                                   (show ctx {:phase :call :tool (:name u) :input (:input u)
                                              :text (toolview/call-str (:name u) (:input u) width)})
@@ -223,7 +272,7 @@
                                 uses)
                   umsg {:role "user" :content results}]
               (log-message! ctx umsg)
-              (recur (conj messages umsg) (inc turn) usage))))))))
+              (recur (conj messages umsg) (inc turn) usage (:usage reply)))))))))
 
 (defn user-message [text] {:role "user" :content [{:type "text" :text text}]})
 
@@ -253,3 +302,65 @@
           :when (fs/directory? dir)
           f (sort (map str (fs/glob dir "*.clj")))]
     (load-extension! f)))
+
+;; ---------------------------------------------------------------- source
+
+(def core-source-dir
+  "src/, the folder that holds the bba namespaces, found through a loaded file."
+  (str (-> (io/resource "bba/core.clj") io/file fs/parent fs/parent)))
+
+(defn- source-ns
+  "The namespace that a source file defines, relative to `root`:
+  bba/codex_auth.clj gives bba.codex-auth."
+  [root f]
+  (-> (str (fs/relativize root f))
+      (str/replace #"\.clj$" "")
+      (str/replace "_" "-")
+      (str/replace "/" ".")
+      symbol))
+
+(defn- source-deps
+  "The bba namespaces that one source file requires in its ns form. Analysis needs a
+  function to exist, so a namespace must reload after the namespaces that it uses."
+  [root f]
+  (let [self (source-ns root f)
+        head (->> (str/split-lines (slurp f))
+                  (take-while #(not (re-find #"^\((def|defn|defonce)" %)))
+                  (str/join "\n"))]
+    (->> (re-seq #"bba\.[a-z0-9\.\-]+" head)
+         (map symbol)
+         (remove #(= % self))
+         set)))
+
+(defn core-namespace-order
+  "The bba namespaces, dependencies first, so a reload cannot analyse a call to a
+  function that the running image does not have yet. A namespace comes after every
+  namespace of the same folder that it requires."
+  [& {:keys [dir]}]
+  (let [root (or dir core-source-dir)
+        deps (into {}
+                   (for [f (sort (map str (fs/glob root "**.clj")))]
+                     [(source-ns root f) (source-deps root f)]))
+        done (atom #{})
+        order (atom [])]
+    (letfn [(visit [n]
+              (when-not (contains? @done n)
+                (swap! done conj n)
+                (doseq [d (sort (get deps n))] (when (contains? deps d) (visit d)))
+                (swap! order conj n)))]
+      (doseq [n (sort (keys deps))] (visit n))
+      @order)))
+
+(defn reload-source!
+  "Reload the bba namespaces from src/, dependencies first, so that the running image
+  gets a function that this build added. Without it, /reload can load an extension
+  that calls a new core function only after a restart. A namespace that fails warns
+  and does not stop the others. Returns the namespaces that reloaded."
+  []
+  (reduce (fn [done n]
+            (try (require n :reload) (conj done n)
+                 (catch Throwable e
+                   (ext/warn "failed to reload " n ": " (ex-message e))
+                   done)))
+          []
+          (core-namespace-order)))

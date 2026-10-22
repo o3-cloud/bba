@@ -1,6 +1,12 @@
 ;; Core extensions are loaded by path (bba.core/load-extensions!), not from the
 ;; classpath, so their namespace names do not follow their file names.
 {:config-in-ns {bba.extensions.compaction    {:linters {:namespace-name-mismatch {:level :off}}}
+                bba.extensions.context       {:linters {:namespace-name-mismatch {:level :off}}}
                 bba.extensions.jev-guardrail {:linters {:namespace-name-mismatch {:level :off}}}
                 bba.extensions.mcp           {:linters {:namespace-name-mismatch {:level :off}}}
-                bba.extensions.skills        {:linters {:namespace-name-mismatch {:level :off}}}}}
+                bba.extensions.prompt-info   {:linters {:namespace-name-mismatch {:level :off}}}
+                bba.extensions.skills        {:linters {:namespace-name-mismatch {:level :off}}}
+                ;; Examples are copied into .bba/extensions/ and loaded by path, so they
+                ;; have the same mismatch.
+                bba.extensions.reverse       {:linters {:namespace-name-mismatch {:level :off}}}
+                bba.extensions.block-rm-rf   {:linters {:namespace-name-mismatch {:level :off}}}}}

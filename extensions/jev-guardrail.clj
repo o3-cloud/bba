@@ -3,10 +3,8 @@
   (:require [babashka.http-client :as http]
             [cheshire.core :as json]
             [clojure.string :as str]
-            [bba.ext :as ext]
-            [bba.provider :as provider]))
+            [bba.ext :as ext]))
 
-(def default-model "typesafe/jev-1.14")
 (def default-threshold 69)
 
 (defn enabled?
@@ -48,7 +46,7 @@
 (defn classify
   "Call Jev's System One API and return a validated 0 to 100 decision."
   [{:keys [env]} name input]
-  (let [call (or (ns-resolve 'bba.provider 'systemone)
+  (let [call (or (some-> (find-ns 'bba.provider) (ns-resolve 'systemone))
                  (fn [e]
                    (let [body {:model (or (get e "BBA_GUARDRAIL_MODEL") "jev-1.14")
                                :state (:state e) :questions (:questions e)}

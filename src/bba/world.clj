@@ -193,7 +193,7 @@
 (defn- publish-snapshot!
   "Write a revision with `log` and the live state; update the in-memory snapshot."
   [type log input removals extra]
-  (let [{:keys [dir rev]} @state
+  (let [{:keys [dir rev adapter]} @state
         n (store/next-rev dir)
         log (mapv #(if (:rev %) % (assoc % :rev n)) log)
         live (or (:state extra) (live-state))
@@ -204,6 +204,7 @@
                                 :base-rev rev :input input :remove (vec removals)
                                 :log log :state keep-state :unprintable unprintable :rollback-of nil}
                                (dissoc extra :state)))
+    (store/prune! dir (:max-revisions adapter))
     (when (seq unprintable) (ext/warn "world state not saved (cannot be printed as data): " (str/join " " unprintable)))
     (swap! state assoc :snapshot {:log log} :rev n :base-rev n)
     {:revision n :op-id op-id}))

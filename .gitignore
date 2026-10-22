@@ -8,3 +8,7 @@ nrepl-port
 .DS_Store
 .bba/
 .shared/
+
+tmp/
+try/
+.playwright-cli/
